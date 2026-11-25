@@ -86,10 +86,17 @@ public final class VPNGuardViewModel: ObservableObject {
     private var failoverAttemptedServerIds: Set<String> = []
 
     public init() {
-        let defaultRepo = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Developer/vpnguard").path
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let candidates = [
+            home.appendingPathComponent("Desktop/Business/Кодинг/VPNGuard").path,
+            home.appendingPathComponent("Developer/vpnguard").path
+        ]
+        let defaultRepo = candidates.first(where: {
+            FileManager.default.fileExists(atPath: ($0 as NSString).appendingPathComponent("update.sh"))
+        }) ?? candidates[0]
         let storedRepo = UserDefaults.standard.string(forKey: Self.sourceRepoPathKey)
-        if let storedRepo, !storedRepo.isEmpty {
+        if let storedRepo, !storedRepo.isEmpty,
+           FileManager.default.fileExists(atPath: (storedRepo as NSString).appendingPathComponent("update.sh")) {
             self.sourceRepoPath = storedRepo
         } else {
             self.sourceRepoPath = defaultRepo
