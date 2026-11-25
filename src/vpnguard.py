@@ -4,16 +4,22 @@ VPNGuard 3.0 - Advanced Anti-VPN Blinking & IP Leak Prevention System for macOS.
 Triple-GID Headless Architecture ensuring zero IP and DNS leaks with transparent sing-box TUN & dedicated Xray-core.
 
 Usage:
-    vpnguard status [--json]          Check complete security posture & diagnostics
-    vpnguard on                       Arm system-wide fail-closed killswitch and daemons
-    vpnguard off                      Disarm killswitch (Captive Portal mode)
-    vpnguard test [--json]            Run 11-point active leak penetration audit
-    vpnguard rules get                Output current dynamic rules.json
-    vpnguard rules apply <path>       Validate and apply new rules.json atomically
-    vpnguard server update <path>     Validate and apply new upstream server xray.json
-    vpnguard run <command...>         Execute command inside fail-closed guarded sandbox
-    vpnguard shell                    Spawn guarded interactive shell session
-    vpnguard watch                    Start continuous background/foreground flap monitor
+    vpnguard status [--json] [--fast]   Check security posture & diagnostics
+    vpnguard on                          Arm fail-closed killswitch and daemons
+    vpnguard off                         Disarm killswitch (Captive Portal mode)
+    vpnguard pause <300|900>             Temporarily disable protection with auto-resume
+    vpnguard resume-if-expired           Re-arm protection if pause timer expired
+    vpnguard test [--json]               Run 12-point active leak penetration audit
+    vpnguard logs --json                 Output sanitized logs and PF/DNS/utun state
+    vpnguard rules get                   Output current dynamic rules.json
+    vpnguard rules apply [--stdin|path]  Validate and apply rules.json atomically
+    vpnguard server list [--json]        List configured upstream server profiles
+    vpnguard server ping --json          Measure direct TCP RTT via GID 890 + IP_BOUND_IF
+    vpnguard server sync-pf              Re-resolve active relay via GID 890 DNS and load PF
+    vpnguard server update [--stdin|p]   Validate and apply upstream server xray.json
+    vpnguard run <command...>            Execute command inside fail-closed GID 888 sandbox
+    vpnguard shell                       Spawn guarded interactive shell session
+    vpnguard watch                       Start continuous local proxy flap monitor
 """
 
 import sys

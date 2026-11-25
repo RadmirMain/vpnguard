@@ -11,7 +11,7 @@ C_GREEN='\033[32m'
 C_YELLOW='\033[33m'
 C_CYAN='\033[36m'
 
-RUSSIAN_IP="5.144.116.28"
+EXPECTED_RU_IP="${VPNGUARD_EXPECTED_RU_IP:-}"
 
 usage() {
     echo -e "${C_BOLD}Использование:${C_RESET} $0 [watch|crash|browser|traffic|status]"
@@ -28,7 +28,7 @@ usage() {
 cmd_watch() {
     echo -e "${C_BOLD}${C_CYAN}=== 🛰️  Тест 1: Непрерывный монитор IP (Сон и смена Wi-Fi) ===${C_RESET}"
     echo -e "Инструкция: закрой крышку Mac на 2-3 мин или переключи Wi-Fi."
-    echo -e "Критерий: трафик либо OFFLINE, либо США. Российский IP (${RUSSIAN_IP}) НИКОГДА не должен появиться."
+    echo -e "Критерий: трафик либо OFFLINE, либо не-РФ туннель (опционально VPNGUARD_EXPECTED_RU_IP=<ip>)."
     echo -e "Для остановки нажми Ctrl+C.\n"
 
     while true; do
@@ -38,10 +38,10 @@ cmd_watch() {
         
         if [[ -z "$ip" ]]; then
             echo -e "[${ts}] ${C_YELLOW}⚡ OFFLINE / CONNECTION REFUSED (Fail-Closed Killswitch защищает en0)${C_RESET}"
-        elif [[ "$ip" == *"$RUSSIAN_IP"* ]]; then
+        elif [[ -n "$EXPECTED_RU_IP" && "$ip" == *"$EXPECTED_RU_IP"* ]]; then
             echo -e "[${ts}] ${C_BOLD}${C_RED}❌ КРИТИЧЕСКАЯ УТЕЧКА! Обнаружен провайдерский IP: ${ip}${C_RESET}"
         else
-            echo -e "[${ts}] ${C_GREEN}🛡️  SECURE TUNNEL IP: ${ip} (US / Non-RU)${C_RESET}"
+            echo -e "[${ts}] ${C_GREEN}🛡️  SECURE TUNNEL IP: ${ip}${C_RESET}"
         fi
         sleep 1
     done
@@ -81,19 +81,12 @@ cmd_browser() {
     echo "Открываем browserleaks.com/webrtc..."
     open "https://browserleaks.com/webrtc"
     echo -e "${C_GREEN}Страницы открыты в браузере по умолчанию.${C_RESET}"
-    echo -e "Критерий: только DNS Cloudflare/США, в WebRTC нет реального IP ${RUSSIAN_IP}."
+    echo -e "Критерий: только DNS Cloudflare/туннеля, в WebRTC нет локального провайдерского IP."
 }
 
 cmd_traffic() {
     echo -e "${C_BOLD}${C_CYAN}=== 📊 Тест 5: Проверка маршрутизации через Clash API ===${C_RESET}"
-    SECRET=$(python3 -c '
-import json
-try:
-    with open("/usr/local/etc/vpnguard/sing-box.json") as f:
-        print(json.load(f)["experimental"]["clash_api"]["secret"])
-except Exception:
-    pass
-')
+    SECRET=$(tr -d '[:space:]' < /usr/local/etc/vpnguard/api_secret 2>/dev/null || true)
     if [[ -z "$SECRET" ]]; then
         echo -e "${C_RED}Не удалось прочитать Clash API secret${C_RESET}"
         exit 1
@@ -136,13 +129,12 @@ cmd_status() {
         fi
     done
 
-    echo "2. GUI App (Menu Bar / Login Items):"
-    login_items=$(osascript -e 'tell application "System Events" to get name of every login item' 2>/dev/null || echo "")
-    if [[ "$login_items" == *"VPNGuard"* ]]; then
-        echo -e "   • VPNGuard.app: ${C_GREEN}ЗАРЕГИСТРИРОВАН в Login Items (поднимется сам при входе)${C_RESET}"
+    echo "2. GUI App (LaunchAgent):"
+    PLIST_PATH="${HOME}/Library/LaunchAgents/com.vpnguard.app.plist"
+    if [[ -f "${PLIST_PATH}" ]]; then
+        echo -e "   • VPNGuard.app: ${C_GREEN}АВТОЗАПУСК ВКЛЮЧЕН (${PLIST_PATH})${C_RESET}"
     else
-        echo -e "   • VPNGuard.app: ${C_YELLOW}НЕ В LOGIN ITEMS (исправляем...)${C_RESET}"
-        osascript -e 'tell application "System Events" to make login item at end with properties {path:"/Applications/VPNGuard.app", hidden:false}' 2>/dev/null || true
+        echo -e "   • VPNGuard.app: ${C_YELLOW}LaunchAgent не включен (включается чекбоксом в приложении)${C_RESET}"
     fi
     echo ""
     vpnguard status
