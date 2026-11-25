@@ -98,7 +98,7 @@ public struct MainContainerView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
 
-                    let hasUpdate = releaseUpdater.isUpdateAvailable || (vm.updateCheckResult?.updateAvailable == true)
+                    let hasUpdate = releaseUpdater.isUpdateAvailable || releaseUpdater.backendSyncNeeded || (vm.updateCheckResult?.updateAvailable == true)
                     Button {
                         showingUpdateSheet = true
                     } label: {
@@ -240,6 +240,39 @@ private struct AppUpdateSheetView: View {
 
             // Body
             VStack(alignment: .leading, spacing: 14) {
+                if releaseUpdater.backendSyncNeeded {
+                    VGCard(padding: 14, accentBorder: VGTheme.statusWarning.opacity(0.4)) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "wrench.and.screwdriver.fill")
+                                .foregroundStyle(VGTheme.statusWarning)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Требуется обновление системного бэкенда")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text("Версия приложения обновилась — синхронизируйте PF/CLI/демоны через Touch ID")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button {
+                                Task {
+                                    let ok = await releaseUpdater.installBundledBackendWithTouchID()
+                                    vm.showToast(ok ? "Системные компоненты обновлены" : "Не удалось обновить бэкенд", isError: !ok)
+                                }
+                            } label: {
+                                HStack(spacing: 5) {
+                                    if releaseUpdater.isSyncingBackend {
+                                        ProgressView().controlSize(.small)
+                                    }
+                                    Text("Обновить (Touch ID)")
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .disabled(releaseUpdater.isSyncingBackend)
+                        }
+                    }
+                }
+
                 // GitHub Releases Card (Primary User Flow)
                 gitHubReleaseCard
 

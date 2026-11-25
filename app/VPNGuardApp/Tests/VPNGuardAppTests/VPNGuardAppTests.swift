@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import VPNGuardApp
 
 final class VPNGuardAppTests: XCTestCase {
@@ -198,5 +199,13 @@ final class VPNGuardAppTests: XCTestCase {
         XCTAssertEqual(release.cleanVersion, "3.1.0")
         XCTAssertEqual(release.zipAsset?.name, "VPNGuard-macos-arm64.zip")
         XCTAssertEqual(release.sha256Asset?.name, "VPNGuard-macos-arm64.zip.sha256")
+
+        // Verify Ed25519 signature helper
+        let priv = Curve25519.Signing.PrivateKey()
+        let pubB64 = priv.publicKey.rawRepresentation.base64EncodedString()
+        let payload = Data("VPNGuard release archive".utf8)
+        let sig = try priv.signature(for: payload).base64EncodedString()
+        XCTAssertTrue(GitHubReleaseUpdater.verifyEd25519Signature(data: payload, signatureBase64: sig, publicKeyBase64: pubB64))
+        XCTAssertFalse(GitHubReleaseUpdater.verifyEd25519Signature(data: Data("tampered".utf8), signatureBase64: sig, publicKeyBase64: pubB64))
     }
 }

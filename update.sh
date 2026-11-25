@@ -193,11 +193,22 @@ if [[ "${NEEDS_FRONTEND_UPDATE}" -eq 1 ]]; then
     cp "${APP_PKG_DIR}/.build/release/VPNGuardApp" "${STAGED_APP}/Contents/MacOS/VPNGuardApp"
     chmod +x "${STAGED_APP}/Contents/MacOS/VPNGuardApp"
     cp "${APP_PKG_DIR}/Resources/Info.plist" "${STAGED_APP}/Contents/Info.plist"
+    if [[ -f "${SCRIPT_DIR}/VERSION" ]]; then
+        APP_VER="$(tr -d '[:space:]' < "${SCRIPT_DIR}/VERSION")"
+        /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${APP_VER}" "${STAGED_APP}/Contents/Info.plist"
+    fi
     if [[ -f "${APP_PKG_DIR}/Resources/AppIcon.icns" ]]; then
         cp "${APP_PKG_DIR}/Resources/AppIcon.icns" "${STAGED_APP}/Contents/Resources/AppIcon.icns"
     fi
     echo -n "APPL????" > "${STAGED_APP}/Contents/PkgInfo"
     printf '%s\n' "${CURRENT_FRONTEND_HASH}" > "${STAGED_APP}/Contents/Resources/frontend.sha256"
+
+    mkdir -p "${STAGED_APP}/Contents/Resources/backend"
+    cp "${SCRIPT_DIR}/install.sh" "${STAGED_APP}/Contents/Resources/backend/install.sh"
+    chmod +x "${STAGED_APP}/Contents/Resources/backend/install.sh"
+    rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='xray/xray.json' --exclude='servers.json' --exclude='.DS_Store' "${SCRIPT_DIR}/src" "${STAGED_APP}/Contents/Resources/backend/"
+    rsync -a --exclude='.DS_Store' "${SCRIPT_DIR}/bin" "${STAGED_APP}/Contents/Resources/backend/"
+    printf '%s\n' "${CURRENT_BACKEND_HASH}" > "${STAGED_APP}/Contents/Resources/backend/backend.sha256"
 
     # Strip extended attributes strictly BEFORE ad-hoc codesign
     xattr -cr "${STAGED_APP}" 2>/dev/null || true

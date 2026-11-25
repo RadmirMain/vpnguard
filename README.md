@@ -102,8 +102,19 @@
 * Homebrew (`brew install xray sing-box`).
 
 ### 2. Первичная установка
+
+#### Вариант А: Готовый релиз из GitHub Releases (без Xcode и Git)
+1. Скачайте `VPNGuard-macos-arm64.zip` на странице **Releases**, распакуйте и перенесите `VPNGuard.app` в `/Applications`.
+2. Поскольку сборка подписана ad-hoc (без платного сертификата Apple Developer ID), при первом запуске после скачивания через браузер снимите атрибут карантина Gatekeeper:
+   ```bash
+   xattr -cr /Applications/VPNGuard.app
+   ```
+3. Откройте `VPNGuard.app` — приложение предложит установить системные компоненты через Touch ID (`install.sh --backend-only`). Последующие обновления из GitHub Releases проверяются криптографической подписью **Ed25519** и **SHA-256** и устанавливаются автоматически.
+
+#### Вариант Б: Сборка из исходников
 ```bash
-cd ~/Developer/vpnguard
+git clone https://github.com/RadmirMain/vpnguard.git VPNGuard
+cd VPNGuard
 
 # Установка ядер (если ещё не установлены)
 brew install xray sing-box
@@ -118,10 +129,10 @@ sudo ./install.sh
 > **После самой первой установки**: выйдите из сеанса macOS или перезагрузите Mac, чтобы активные сессии сбросили кэшированную группу `888(vpnguard)`.
 
 ### 3. Последующие обновления (в 1 клик или из терминала)
-- **Из приложения**: нажмите **«Обновить VPNGuard...»** в боковой панели.
+- **Из приложения**: нажмите **«Обновление…»** в боковой панели (скачивает готовый релиз с GitHub или собирает из локального репозитория).
 - **Из терминала**:
   ```bash
-  ~/Developer/vpnguard/update.sh --relaunch
+  ./update.sh --relaunch
   ```
 
 ---

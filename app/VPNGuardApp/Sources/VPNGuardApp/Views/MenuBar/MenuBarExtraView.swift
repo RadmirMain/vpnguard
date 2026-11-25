@@ -16,8 +16,8 @@ public struct MenuBarExtraView: View {
             // MARK: - Compact Status Header
             statusHeader
 
-            // MARK: - Update Available Quick Banner
-            if releaseUpdater.isUpdateAvailable || vm.updateCheckResult?.updateAvailable == true {
+            // MARK: - Update / Backend Sync Quick Banner
+            if releaseUpdater.isUpdateAvailable || releaseUpdater.backendSyncNeeded || vm.updateCheckResult?.updateAvailable == true {
                 updateBanner
             }
 
@@ -120,13 +120,14 @@ public struct MenuBarExtraView: View {
     }
 
     private var updateBanner: some View {
-        VGCard(padding: 10, accentBorder: VGTheme.accentPrimary.opacity(0.35)) {
+        let isBackendSync = releaseUpdater.backendSyncNeeded && !releaseUpdater.isUpdateAvailable
+        return VGCard(padding: 10, accentBorder: (isBackendSync ? VGTheme.statusWarning : VGTheme.accentPrimary).opacity(0.35)) {
             HStack(spacing: 10) {
-                Image(systemName: "arrow.down.app.fill")
+                Image(systemName: isBackendSync ? "wrench.and.screwdriver.fill" : "arrow.down.app.fill")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(VGTheme.accentPrimary)
+                    .foregroundStyle(isBackendSync ? VGTheme.statusWarning : VGTheme.accentPrimary)
 
-                Text("Доступно обновление")
+                Text(isBackendSync ? "Нужно обновить демоны" : "Доступно обновление")
                     .font(.system(size: 12, weight: .semibold))
 
                 Spacer()

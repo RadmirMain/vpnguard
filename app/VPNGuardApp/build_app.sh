@@ -2,18 +2,24 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 APP_BUNDLE_NAME="VPNGuard.app"
 BUILD_DIR="${SCRIPT_DIR}/.build/release"
 STAGING_ROOT="$(mktemp -d "/tmp/vpnguard-build.XXXXXX")"
 OUTPUT_APP="${STAGING_ROOT}/${APP_BUNDLE_NAME}"
 TARGET_APP="/Applications/${APP_BUNDLE_NAME}"
 
+VERSION="3.0.0"
+if [[ -f "${REPO_ROOT}/VERSION" ]]; then
+    VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/VERSION")"
+fi
+
 cleanup() {
     rm -rf "${STAGING_ROOT}"
 }
 trap cleanup EXIT
 
-echo "==> Building VPNGuardApp (Release arm64)..."
+echo "==> Building VPNGuardApp v${VERSION} (Release arm64)..."
 cd "${SCRIPT_DIR}"
 swift build -c release --arch arm64
 
@@ -25,6 +31,7 @@ cp "${BUILD_DIR}/VPNGuardApp" "${OUTPUT_APP}/Contents/MacOS/VPNGuardApp"
 chmod +x "${OUTPUT_APP}/Contents/MacOS/VPNGuardApp"
 
 cp "${SCRIPT_DIR}/Resources/Info.plist" "${OUTPUT_APP}/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${OUTPUT_APP}/Contents/Info.plist"
 
 if [[ -f "${SCRIPT_DIR}/Resources/AppIcon.icns" ]]; then
     cp "${SCRIPT_DIR}/Resources/AppIcon.icns" "${OUTPUT_APP}/Contents/Resources/AppIcon.icns"
@@ -32,11 +39,32 @@ fi
 
 echo -n "APPL????" > "${OUTPUT_APP}/Contents/PkgInfo"
 
+# Frontend hash
 (
     cd "${SCRIPT_DIR}"
     find Package.swift build_app.sh Resources Sources -type f \
         ! -name '.DS_Store' \
         -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}' > "${OUTPUT_APP}/Contents/Resources/frontend.sha256"
+)
+
+# Bundle backend payload + backend.sha256 inside Resources/backend for self-contained updates
+BACKEND_DEST="${OUTPUT_APP}/Contents/Resources/backend"
+mkdir -p "${BACKEND_DEST}"
+if [[ -f "${REPO_ROOT}/install.sh" ]]; then
+    cp "${REPO_ROOT}/install.sh" "${BACKEND_DEST}/install.sh"
+    chmod +x "${BACKEND_DEST}/install.sh"
+fi
+if [[ -d "${REPO_ROOT}/src" ]]; then
+    rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='xray/xray.json' --exclude='servers.json' --exclude='.DS_Store' "${REPO_ROOT}/src" "${BACKEND_DEST}/"
+fi
+if [[ -d "${REPO_ROOT}/bin" ]]; then
+    rsync -a --exclude='.DS_Store' "${REPO_ROOT}/bin" "${BACKEND_DEST}/"
+fi
+(
+    cd "${REPO_ROOT}"
+    find install.sh src/vpnguard.py src/vpnguard_exec.c src/pf src/xray src/singbox src/browser bin/vpnguard \
+        -type f ! -name 'xray.json' ! -name '.DS_Store' \
+        -print0 2>/dev/null | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}' > "${BACKEND_DEST}/backend.sha256"
 )
 
 echo "==> Stripping extended attributes & ad-hoc signing ${APP_BUNDLE_NAME}..."
@@ -55,6 +83,6 @@ fi
 mv "${STAGED_TARGET}" "${TARGET_APP}"
 rm -rf "${BACKUP_APP}"
 
-echo "==> VPNGuard.app build and installation completed successfully!"
+echo "==> VPNGuard.app v${VERSION} build and installation completed successfully!"
 echo "    (Auto-start at login is managed via ~/Library/LaunchAgents/com.vpnguard.app.plist inside the app)"
 ls -ld "${TARGET_APP}"

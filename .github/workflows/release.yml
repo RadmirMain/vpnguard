@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g. 3.1.0)'
+        description: 'Version tag (e.g. 3.0.1)'
         required: true
         default: '3.0.1'
 
@@ -40,15 +40,16 @@ jobs:
             TAG="${GITHUB_REF_NAME}"
             VERSION="${TAG#v}"
           fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Build VPNGuard.app (Release arm64)
+      - name: Build VPNGuard.app (Release arm64) with bundled backend
         working-directory: app/VPNGuardApp
         run: |
+          REPO_ROOT="$(cd ../.. && pwd)"
           swift build -c release --arch arm64
           mkdir -p dist/VPNGuard.app/Contents/MacOS
-          mkdir -p dist/VPNGuard.app/Contents/Resources
+          mkdir -p dist/VPNGuard.app/Contents/Resources/backend
           cp .build/release/VPNGuardApp dist/VPNGuard.app/Contents/MacOS/VPNGuardApp
           chmod +x dist/VPNGuard.app/Contents/MacOS/VPNGuardApp
           cp Resources/Info.plist dist/VPNGuard.app/Contents/Info.plist
@@ -57,14 +58,50 @@ jobs:
             cp Resources/AppIcon.icns dist/VPNGuard.app/Contents/Resources/AppIcon.icns
           fi
           echo -n "APPL????" > dist/VPNGuard.app/Contents/PkgInfo
-          (find Sources Resources -type f | sort | xargs cat; cat Package.swift) | shasum -a 256 | awk '{print $1}' > dist/VPNGuard.app/Contents/Resources/frontend.sha256
+          find Package.swift build_app.sh Resources Sources -type f ! -name '.DS_Store' \
+            -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}' > dist/VPNGuard.app/Contents/Resources/frontend.sha256
+
+          # Bundle backend payload + backend.sha256 inside Resources/backend
+          cp "${REPO_ROOT}/install.sh" dist/VPNGuard.app/Contents/Resources/backend/install.sh
+          chmod +x dist/VPNGuard.app/Contents/Resources/backend/install.sh
+          rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='xray/xray.json' --exclude='servers.json' --exclude='.DS_Store' "${REPO_ROOT}/src" dist/VPNGuard.app/Contents/Resources/backend/
+          rsync -a --exclude='.DS_Store' "${REPO_ROOT}/bin" dist/VPNGuard.app/Contents/Resources/backend/
+          (
+            cd "${REPO_ROOT}"
+            find install.sh src/vpnguard.py src/vpnguard_exec.c src/pf src/xray src/singbox src/browser bin/vpnguard \
+              -type f ! -name 'xray.json' ! -name '.DS_Store' \
+              -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}'
+          ) > dist/VPNGuard.app/Contents/Resources/backend/backend.sha256
+
+          xattr -cr dist/VPNGuard.app || true
           codesign --force --deep --sign - dist/VPNGuard.app
 
-      - name: Package ZIP and compute SHA-256
+      - name: Package ZIP via ditto and compute SHA-256
         working-directory: app/VPNGuardApp/dist
         run: |
           ditto -c -k --sequesterRsrc --keepParent VPNGuard.app VPNGuard-macos-arm64.zip
           shasum -a 256 VPNGuard-macos-arm64.zip > VPNGuard-macos-arm64.zip.sha256
+
+      - name: Sign ZIP with Ed25519 (if RELEASE_SIGNING_PRIVATE_KEY secret is set)
+        env:
+          RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY }}
+        working-directory: app/VPNGuardApp/dist
+        run: |
+          if [[ -n "${RELEASE_SIGNING_PRIVATE_KEY:-}" ]]; then
+            swift -e '
+            import Foundation
+            import CryptoKit
+            let keyB64 = ProcessInfo.processInfo.environment["RELEASE_SIGNING_PRIVATE_KEY"]!.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let keyData = Data(base64Encoded: keyB64) else { fatalError("Invalid base64 key") }
+            let privKey = try Curve25519.Signing.PrivateKey(rawRepresentation: keyData)
+            let zipData = try Data(contentsOf: URL(fileURLWithPath: "VPNGuard-macos-arm64.zip"))
+            let sig = try privKey.signature(for: zipData)
+            try sig.base64EncodedString().write(toFile: "VPNGuard-macos-arm64.zip.sig", atomically: true, encoding: .utf8)
+            '
+            echo "Created Ed25519 signature VPNGuard-macos-arm64.zip.sig"
+          else
+            echo "RELEASE_SIGNING_PRIVATE_KEY not set; skipping Ed25519 .sig generation"
+          fi
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -72,6 +109,15 @@ jobs:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: VPNGuard ${{ steps.ver.outputs.tag }}
           generate_release_notes: true
+          fail_on_unmatched_files: false
+          body: |
+            ### Первичная установка на macOS (если скачано через браузер)
+            Так как релиз подписан ad-hoc без платного сертификата Apple Developer ID, после переноса `VPNGuard.app` в `/Applications` выполните один раз:
+            ```bash
+            xattr -cr /Applications/VPNGuard.app
+            ```
+            Затем откройте `VPNGuard.app` и установите системные компоненты (`sudo ./install.sh` или через встроенный помощник обновления бэкенда).
           files: |
             app/VPNGuardApp/dist/VPNGuard-macos-arm64.zip
             app/VPNGuardApp/dist/VPNGuard-macos-arm64.zip.sha256
+            app/VPNGuardApp/dist/VPNGuard-macos-arm64.zip.sig
