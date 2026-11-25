@@ -97,4 +97,35 @@ final class VPNGuardAppTests: XCTestCase {
         let statusWith = try JSONDecoder().decode(SystemStatus.self, from: Data(withPauseJson.utf8))
         XCTAssertEqual(statusWith.pauseUntil, 1800000300)
     }
+
+    func testCanonicalProcessTargetAndDomainHelpers() {
+        let nested = VPNGuardViewModel.canonicalProcessTarget(
+            from: "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper.app/Contents/MacOS/Cursor Helper"
+        )
+        XCTAssertEqual(nested.name, "Cursor")
+        XCTAssertEqual(nested.path, "/Applications/Cursor.app")
+
+        let cli = VPNGuardViewModel.canonicalProcessTarget(from: "/opt/homebrew/bin/node")
+        XCTAssertEqual(cli.name, "node")
+        XCTAssertEqual(cli.path, "/opt/homebrew/bin/node")
+
+        XCTAssertTrue(VPNGuardViewModel.isValidDomainHost("api.anthropic.com"))
+        XCTAssertFalse(VPNGuardViewModel.isValidDomainHost("1.1.1.1"))
+        XCTAssertFalse(VPNGuardViewModel.isValidDomainHost("—"))
+        XCTAssertEqual(VPNGuardViewModel.rootDomain(from: "api.anthropic.com"), "anthropic.com")
+        XCTAssertNil(VPNGuardViewModel.rootDomain(from: "anthropic.com"))
+    }
+
+    func testDiagnosticsSnapshotDecoding() throws {
+        let json = """
+        {
+          "generatedAt": "2026-11-25T18:00:00Z",
+          "logs": { "singbox": "ok", "xray": "ok", "pf": "ok" },
+          "system": { "pfRules": "pass", "dns": "nameserver", "utun": "utun99" }
+        }
+        """
+        let snap = try JSONDecoder().decode(DiagnosticsLogsSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snap.logs.singbox, "ok")
+        XCTAssertEqual(snap.system.utun, "utun99")
+    }
 }

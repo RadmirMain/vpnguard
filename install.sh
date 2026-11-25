@@ -343,7 +343,8 @@ Defaults:%admin env_reset
     /usr/local/bin/vpnguard server delete --stdin, \
     /usr/local/bin/vpnguard server update --stdin, \
     /usr/local/bin/vpnguard test, \
-    /usr/local/bin/vpnguard test --json
+    /usr/local/bin/vpnguard test --json, \
+    /usr/local/bin/vpnguard logs --json
 EOF
 chmod 440 "${SUDOERS_FILE}"
 if visudo -c -f "${SUDOERS_FILE}" &>/dev/null; then

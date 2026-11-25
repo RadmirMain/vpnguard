@@ -339,6 +339,7 @@ public struct MenuBarExtraView: View {
             // Action Buttons
             HStack(spacing: 8) {
                 Button {
+                    vm.requestedNavigationSection = .diagnostics
                     onOpenSettings()
                     Task {
                         await vm.runSecurityAudit()

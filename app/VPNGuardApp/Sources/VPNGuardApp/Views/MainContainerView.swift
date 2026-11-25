@@ -7,6 +7,7 @@ public enum NavigationSection: String, CaseIterable, Identifiable {
     case websites = "Сайты и домены"
     case traffic = "Монитор трафика"
     case server = "Сервер"
+    case diagnostics = "Диагностика и логи"
     
     public var id: String { rawValue }
     
@@ -17,6 +18,7 @@ public enum NavigationSection: String, CaseIterable, Identifiable {
         case .websites: return "globe"
         case .traffic: return "waveform.path.ecg"
         case .server: return "server.rack"
+        case .diagnostics: return "stethoscope"
         }
     }
 }
@@ -104,6 +106,8 @@ public struct MainContainerView: View {
                         TrafficMonitorView(vm: vm)
                     case .server:
                         ServerConfigView(vm: vm)
+                    case .diagnostics:
+                        DiagnosticsView(vm: vm)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -118,6 +122,12 @@ public struct MainContainerView: View {
             }
         }
         .frame(minWidth: 800, minHeight: 540)
+        .onChange(of: vm.requestedNavigationSection) { _, next in
+            if let next {
+                selectedSection = next
+                vm.requestedNavigationSection = nil
+            }
+        }
         .onDisappear {
             TrafficMonitorService.shared.stopMonitoring()
         }

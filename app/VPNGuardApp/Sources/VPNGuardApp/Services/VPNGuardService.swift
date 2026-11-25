@@ -212,9 +212,31 @@ public final class VPNGuardService {
                     return
                 }
 
-                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                let lock = NSLock()
+                var outData = Data()
+                var errData = Data()
+                let ioGroup = DispatchGroup()
+
+                ioGroup.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let d = outPipe.fileHandleForReading.readDataToEndOfFile()
+                    lock.lock()
+                    outData = d
+                    lock.unlock()
+                    ioGroup.leave()
+                }
+
+                ioGroup.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let d = errPipe.fileHandleForReading.readDataToEndOfFile()
+                    lock.lock()
+                    errData = d
+                    lock.unlock()
+                    ioGroup.leave()
+                }
+
                 process.waitUntilExit()
+                ioGroup.wait()
 
                 let outStr = String(data: outData, encoding: .utf8) ?? ""
                 let errStr = String(data: errData, encoding: .utf8) ?? ""
@@ -342,6 +364,21 @@ public final class VPNGuardService {
             return try jsonDecoder.decode(AuditReport.self, from: data)
         } catch {
             throw VPNGuardError.decodingError("Ошибка парсинга аудита: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Sanitized Diagnostics & Logs
+    public func fetchDiagnosticLogs() async throws -> DiagnosticsLogsSnapshot {
+        let result = await executor.execute(arguments: ["logs", "--json"], timeout: 20.0)
+        guard result.isSuccess, let data = result.stdout.data(using: .utf8), !data.isEmpty else {
+            let msg = result.stderr.isEmpty ? "Не удалось получить диагностические логи" : result.stderr
+            throw VPNGuardError.commandFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        do {
+            return try jsonDecoder.decode(DiagnosticsLogsSnapshot.self, from: data)
+        } catch {
+            throw VPNGuardError.decodingError("Ошибка парсинга логов: \(error.localizedDescription)")
         }
     }
 }

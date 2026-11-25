@@ -222,98 +222,65 @@ public struct DashboardView: View {
         }
     }
     
-    // MARK: - Audit Section
+    // MARK: - Audit Section (Summary + Shortcut to Diagnostics Tab)
     private var auditSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Комплексный аудит утечек")
-                        .font(.headline)
-                        .foregroundColor(.primary)
-                    Text("12-точечная проверка изоляции ядра XNU, сокетов, mDNS, utun99 и зеркал")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
+        GlassCard(padding: 16) {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.blue.opacity(0.14))
+                        .frame(width: 36, height: 36)
+                    Image(systemName: "stethoscope")
+                        .font(.system(size: 16))
+                        .foregroundColor(.blue)
                 }
-                
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Аудит утечек и системные логи")
+                        .font(.system(size: 14, weight: .bold))
+                    if let report = vm.auditReport {
+                        Text(report.passed
+                             ? "Последняя проверка: все \(report.total) тестов пройдены"
+                             : "Последняя проверка: пройдено \(report.passedCount) из \(report.total) тестов")
+                            .font(.system(size: 12))
+                            .foregroundColor(report.passed ? .green : .orange)
+                    } else {
+                        Text("12-точечная проверка PF, GID 888/889/890, DNS, utun99 и просмотр логов")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
                 Spacer()
 
+                Button("Открыть вкладку") {
+                    vm.requestedNavigationSection = .diagnostics
+                }
+                .buttonStyle(.bordered)
+
                 Button {
+                    vm.requestedNavigationSection = .diagnostics
                     Task {
                         await vm.runSecurityAudit()
                     }
                 } label: {
                     HStack(spacing: 6) {
                         if vm.isRunningAudit {
-                            ProgressView()
-                                .scaleEffect(0.7)
-                            Text("Выполняется аудит...")
+                            ProgressView().scaleEffect(0.65)
+                            Text("Аудит...")
                         } else {
                             Image(systemName: "play.fill")
-                            Text("Запустить полный аудит")
+                            Text("Проверить утечки")
                         }
                     }
                     .font(.system(size: 12, weight: .semibold))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
                     .background(Color.blue.gradient, in: RoundedRectangle(cornerRadius: 8))
                     .foregroundColor(.white)
                 }
                 .buttonStyle(.plain)
                 .disabled(vm.isRunningAudit)
-            }
-            
-            if let report = vm.auditReport {
-                VStack(spacing: 8) {
-                    HStack {
-                        Image(systemName: report.passed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                            .foregroundColor(report.passed ? .green : .orange)
-                        Text(report.passed
-                             ? "Все \(report.total) проверок успешно пройдены: Утечек нет!"
-                             : "Пройдено \(report.passedCount) из \(report.total) проверок")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(report.passed ? .green : .orange)
-                        Spacer()
-                    }
-                    .padding(.vertical, 4)
-                    
-                    ForEach(report.tests) { test in
-                        HStack(alignment: .top, spacing: 12) {
-                            Image(systemName: test.passed ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .font(.system(size: 14))
-                                .foregroundColor(test.passed ? .green : .red)
-                                .frame(width: 16, height: 16)
-                            
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(test.name)
-                                    .font(.system(size: 12, weight: .semibold))
-                                Text(test.details)
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            
-                            Text(test.passed ? "PASS" : "FAIL")
-                                .font(.system(size: 10, weight: .bold))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(test.passed ? Color.green.opacity(0.15) : Color.red.opacity(0.15), in: Capsule())
-                                .foregroundColor(test.passed ? .green : .red)
-                        }
-                        .padding(10)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-                    }
-                }
-            } else if !vm.isRunningAudit {
-                GlassCard(padding: 16) {
-                    HStack {
-                        Image(systemName: "info.circle")
-                            .foregroundColor(.secondary)
-                        Text("Нажмите «Запустить полный аудит», чтобы выполнить 12 тестов на утечки IP, DNS, IPv6, utun99 и LPE.")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                    }
-                }
             }
         }
     }

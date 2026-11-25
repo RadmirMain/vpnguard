@@ -31,6 +31,7 @@ import uuid
 import copy
 import ipaddress
 import grp
+from collections import deque
 from typing import Dict, Any, Optional, Tuple, List
 
 VERSION = "3.0.0"
@@ -65,6 +66,9 @@ DNS_BACKUP_PATH = "/usr/local/etc/vpnguard/dns_backup.json"
 API_SECRET_PATH = "/usr/local/etc/vpnguard/api_secret"
 PF_ANCHOR_FILE = "/etc/pf.anchors/vpnguard"
 PF_EGRESS_FILE = "/usr/local/etc/vpnguard/pf.egress.conf"
+LOG_SINGBOX_PATH = "/var/log/vpnguard-singbox.log"
+LOG_XRAY_PATH = "/var/log/vpnguard-xray.log"
+LOG_PF_PATH = "/var/log/vpnguard.log"
 SINGBOX_BIN = "/usr/local/libexec/vpnguard-singbox"
 XRAY_BIN = "/usr/local/libexec/vpnguard-xray"
 MANAGED_DNS_SERVER = "1.1.1.1"
@@ -909,18 +913,21 @@ def build_singbox_config(rules: Dict[str, Any], relay_ip: Optional[Any] = None) 
     # Private IP Direct
     route_rules.append({"ip_is_private": True, "outbound": "direct"})
 
-    # App rules by process_path_regex
+    # App rules by process_path_regex (for .app bundles) or exact process_path (for CLI binaries)
     for app in apps:
         if not app.get("enabled", True):
             continue
         bp = app.get("bundlePath", "").strip().rstrip("/")
         if not bp:
             continue
-        escaped = re.escape(bp)
-        regex = f"^{escaped}/.*"
         action = app.get("action", "proxy")
         outbound = "xray-upstream" if action == "proxy" else ("direct" if action == "direct" else "block")
-        route_rules.append({"process_path_regex": [regex], "outbound": outbound})
+        if bp.endswith(".app"):
+            escaped = re.escape(bp)
+            regex = f"^{escaped}/.*"
+            route_rules.append({"process_path_regex": [regex], "outbound": outbound})
+        else:
+            route_rules.append({"process_path": [bp], "outbound": outbound})
 
     # Domain rules
     for d in domains:
@@ -1540,6 +1547,154 @@ def cmd_resume_if_expired(args: argparse.Namespace) -> int:
         "pauseUntil": target_ts,
         "remaining": max(0, int(target_ts - now))
     }))
+    return 0
+
+
+def _tail_file_lines(path: str, max_lines: int = 150) -> str:
+    """Read last max_lines from a text log file safely."""
+    if not os.path.exists(path):
+        return f"(Файл не найден: {path})"
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = deque(f, maxlen=max_lines)
+        text = "".join(lines).strip()
+        return text if text else "(Лог пуст)"
+    except Exception as e:
+        return f"(Ошибка чтения {path}: {e})"
+
+
+def _collect_sensitive_literals() -> List[str]:
+    """Collect configured server IPs/hosts/SNI/keys and Clash API secret for log redaction."""
+    safe_ips = {"127.0.0.1", "0.0.0.0", "1.1.1.1", "77.88.8.8", "172.19.0.1", "172.19.0.2"}
+    literals: List[str] = []
+
+    def add_lit(val: Any) -> None:
+        if not val:
+            return
+        s = str(val).strip()
+        if len(s) < 4 or s in safe_ips or s.startswith("127.0.0."):
+            return
+        if s not in literals:
+            literals.append(s)
+
+    if os.path.exists(API_SECRET_PATH):
+        try:
+            with open(API_SECRET_PATH, "r", encoding="utf-8") as f:
+                add_lit(f.read().strip())
+        except Exception:
+            pass
+
+    if os.path.exists(SERVERS_FILE_PATH):
+        try:
+            with open(SERVERS_FILE_PATH, "r", encoding="utf-8") as f:
+                store = json.load(f)
+            for s in store.get("servers", []):
+                add_lit(s.get("host"))
+                add_lit(s.get("sni"))
+                for ip in s.get("resolvedIps") or []:
+                    add_lit(ip)
+                xc = s.get("xrayConfig") or {}
+                for out in xc.get("outbounds", []):
+                    stream = out.get("streamSettings") or {}
+                    rs = stream.get("realitySettings") or {}
+                    add_lit(rs.get("publicKey"))
+                    add_lit(rs.get("shortId"))
+                    add_lit(rs.get("serverName"))
+                    ts = stream.get("tlsSettings") or {}
+                    add_lit(ts.get("serverName"))
+        except Exception:
+            pass
+
+    if os.path.exists(PF_EGRESS_FILE):
+        try:
+            with open(PF_EGRESS_FILE, "r", encoding="utf-8") as f:
+                for ip_m in re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", f.read()):
+                    add_lit(ip_m)
+        except Exception:
+            pass
+
+    # Replace longest literals first to avoid partial prefix masking
+    literals.sort(key=len, reverse=True)
+    return literals
+
+
+def redact_sensitive_text(text: str, extra_secrets: Optional[List[str]] = None) -> str:
+    """Mask vless:// URIs, UUIDs, Reality keys, Bearer tokens, and configured relay hosts/IPs."""
+    if not text:
+        return text
+
+    redacted = text
+    redacted = re.sub(r"vless://[^\s\"'<>]+", "vless://[REDACTED]", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(
+        r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
+        "[REDACTED_UUID]",
+        redacted,
+    )
+    redacted = re.sub(r"(Bearer\s+)[A-Za-z0-9._\-]+", r"\1[REDACTED_SECRET]", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(
+        r"([?&](?:pbk|publicKey|sid|shortId)=)[^&\s#]+",
+        r"\1[REDACTED]",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r'("(?:publicKey|shortId|secret|id)"\s*:\s*")[^"]+(")',
+        r"\1[REDACTED]\2",
+        redacted,
+    )
+
+    for lit in (extra_secrets or []):
+        if lit:
+            redacted = redacted.replace(lit, "[REDACTED_SERVER]")
+
+    return redacted
+
+
+def _run_diag_cmd(cmd: List[str], max_lines: int = 120) -> str:
+    """Execute a diagnostic read-only command and return bounded stdout/stderr."""
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        raw = res.stdout.strip() or res.stderr.strip() or "(пусто)"
+        lines = raw.splitlines()[:max_lines]
+        return "\n".join(lines)
+    except Exception as e:
+        return f"(Ошибка выполнения {' '.join(cmd)}: {e})"
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    """Output sanitized last 150 lines of VPNGuard logs and PF/DNS/utun99 diagnostics."""
+    secrets_list = _collect_sensitive_literals()
+
+    logs_payload = {
+        "singbox": redact_sensitive_text(_tail_file_lines(LOG_SINGBOX_PATH, 150), secrets_list),
+        "xray": redact_sensitive_text(_tail_file_lines(LOG_XRAY_PATH, 150), secrets_list),
+        "pf": redact_sensitive_text(_tail_file_lines(LOG_PF_PATH, 150), secrets_list),
+    }
+
+    pf_main = _run_diag_cmd(["pfctl", "-a", "vpnguard", "-s", "rules"], 120)
+    pf_egress = _run_diag_cmd(["pfctl", "-a", "vpnguard/egress", "-s", "rules"], 60)
+    pf_combined = f"# anchor vpnguard\n{pf_main}\n\n# sub-anchor vpnguard/egress\n{pf_egress}"
+
+    system_payload = {
+        "pfRules": redact_sensitive_text(pf_combined, secrets_list),
+        "dns": redact_sensitive_text(_run_diag_cmd(["scutil", "--dns"], 120), secrets_list),
+        "utun": redact_sensitive_text(_run_diag_cmd(["ifconfig", "utun99"], 60), secrets_list),
+    }
+
+    report = {
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "logs": logs_payload,
+        "system": system_payload,
+    }
+
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0
+
+    for name, content in logs_payload.items():
+        print(f"=== LOG: {name} ===\n{content}\n")
+    for name, content in system_payload.items():
+        print(f"=== SYSTEM: {name} ===\n{content}\n")
     return 0
 
 
@@ -3193,6 +3348,11 @@ def main() -> int:
     p_test = subparsers.add_parser("test", help="Run active leak penetration test suite")
     p_test.add_argument("--json", action="store_true", help="Output test results in JSON format")
     p_test.set_defaults(func=cmd_test)
+
+    # logs
+    p_logs = subparsers.add_parser("logs", help="Output sanitized diagnostic logs and PF/DNS state")
+    p_logs.add_argument("--json", action="store_true", help="Output logs in JSON format")
+    p_logs.set_defaults(func=cmd_logs)
 
     # rules
     p_rules = subparsers.add_parser("rules", help="Manage dynamic routing rules (rules.json)")

@@ -23,8 +23,11 @@ public final class VPNGuardViewModel: ObservableObject {
     @Published public var hasUnappliedChanges: Bool = false
     @Published public var lastAppliedRules: UserRules = .empty
 
-    // Audit State
+    // Audit & Diagnostics State
     @Published public var auditReport: AuditReport? = nil
+    @Published public var diagnosticsSnapshot: DiagnosticsLogsSnapshot? = nil
+    @Published public var isLoadingDiagnostics: Bool = false
+    @Published public var requestedNavigationSection: NavigationSection? = nil
 
     // UI Messages
     @Published public var toastMessage: String? = nil
@@ -472,6 +475,87 @@ public final class VPNGuardViewModel: ObservableObject {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // MARK: - 1-Click Rules Helpers (Traffic Monitor)
+    nonisolated public static func canonicalProcessTarget(from processPath: String) -> (name: String, path: String) {
+        let trimmed = processPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return ("Unknown", "") }
+
+        // Find FIRST '.app' segment so nested helpers like Cursor Helper.app map to /Applications/Cursor.app
+        let components = (trimmed as NSString).pathComponents
+        var acc: [String] = []
+        for comp in components {
+            acc.append(comp)
+            if comp.lowercased().hasSuffix(".app") {
+                let appBundlePath = NSString.path(withComponents: acc)
+                let appName = (comp as NSString).deletingPathExtension
+                return (appName.isEmpty ? comp : appName, appBundlePath)
+            }
+        }
+
+        let binName = (trimmed as NSString).lastPathComponent
+        return (binName.isEmpty ? trimmed : binName, trimmed)
+    }
+
+    nonisolated public static func isValidDomainHost(_ host: String) -> Bool {
+        let cleaned = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, cleaned != "—", cleaned.contains(".") else { return false }
+        // Reject raw IPv4 / IPv6 literals
+        var sin = in_addr()
+        var sin6 = in6_addr()
+        if inet_pton(AF_INET, cleaned, &sin) == 1 || inet_pton(AF_INET6, cleaned, &sin6) == 1 {
+            return false
+        }
+        return !cleaned.contains(":")
+    }
+
+    nonisolated public static func rootDomain(from host: String) -> String? {
+        let cleaned = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard isValidDomainHost(cleaned) else { return nil }
+        let parts = cleaned.split(separator: ".").map(String.init)
+        guard parts.count >= 3 else { return nil }
+        return parts.suffix(2).joined(separator: ".")
+    }
+
+    public func upsertDomainRule(domain input: String, action: RuleAction, applyImmediately: Bool = true) async {
+        let cleaned = sanitizeDomain(input)
+        guard Self.isValidDomainHost(cleaned) else {
+            showToast("Некорректный домен для правила: \(input)", isError: true)
+            return
+        }
+
+        if let idx = rules.domains.firstIndex(where: { $0.domain.caseInsensitiveCompare(cleaned) == .orderedSame }) {
+            rules.domains[idx].action = action
+            rules.domains[idx].enabled = true
+        } else {
+            rules.domains.append(DomainRule(domain: cleaned, action: action, enabled: true))
+        }
+        hasUnappliedChanges = true
+
+        if applyImmediately {
+            await applyChanges()
+        }
+    }
+
+    public func upsertAppRule(processPath: String, action: RuleAction, applyImmediately: Bool = true) async {
+        let target = Self.canonicalProcessTarget(from: processPath)
+        guard !target.path.isEmpty else {
+            showToast("Путь процесса не определён", isError: true)
+            return
+        }
+
+        if let idx = rules.apps.firstIndex(where: { $0.bundlePath == target.path }) {
+            rules.apps[idx].action = action
+            rules.apps[idx].enabled = true
+        } else {
+            rules.apps.append(AppRule(name: target.name, bundlePath: target.path, action: action, enabled: true))
+        }
+        hasUnappliedChanges = true
+
+        if applyImmediately {
+            await applyChanges()
+        }
+    }
+
     // MARK: - Server Update
     public func updateServerConfig(jsonText: String) async -> Bool {
         guard !isUpdatingServer else { return false }
@@ -572,6 +656,77 @@ public final class VPNGuardViewModel: ObservableObject {
             showToast("Ошибка запуска аудита: \(error.localizedDescription)", isError: true)
         }
         isRunningAudit = false
+    }
+
+    public func loadDiagnosticsLogs(silent: Bool = false) async {
+        guard !isLoadingDiagnostics else { return }
+        isLoadingDiagnostics = true
+        defer { isLoadingDiagnostics = false }
+
+        do {
+            diagnosticsSnapshot = try await service.fetchDiagnosticLogs()
+        } catch {
+            if !silent {
+                showToast("Ошибка чтения логов: \(error.localizedDescription)", isError: true)
+            }
+        }
+    }
+
+    public func copyDiagnosticsMarkdownReport() {
+        var lines: [String] = []
+        lines.append("# VPNGuard Diagnostic Report")
+        lines.append("")
+        lines.append("- **Generated:** \(diagnosticsSnapshot?.generatedAt ?? ISO8601DateFormatter().string(from: Date()))")
+        lines.append("- **Protection Active:** \(isProtectionActive)")
+        lines.append("- **PF Enabled:** \(status.pfEnabled) (Rules: \(status.pfRulesCount), Blocked packets: \(status.pfBlockedPackets))")
+        lines.append("- **Xray:** running=\(status.xrayRunning.running), pid=\(status.xrayRunning.pid.map(String.init) ?? "none")")
+        lines.append("- **sing-box:** running=\(status.singboxRunning.running), pid=\(status.singboxRunning.pid.map(String.init) ?? "none"), utun=\(status.utunInterface ?? "none")")
+        lines.append("- **Active Server:** \(activeServer?.name ?? status.activeServerName ?? "none")")
+        lines.append("")
+
+        if let report = auditReport {
+            lines.append("## 12-Point Leak Audit (\(report.passedCount)/\(report.total))")
+            for item in report.tests {
+                lines.append("- [\(item.passed ? "x" : " ")] **\(item.name)** — \(item.details)")
+            }
+            lines.append("")
+        }
+
+        if let snap = diagnosticsSnapshot {
+            lines.append("## PF Rules")
+            lines.append("```")
+            lines.append(snap.system.pfRules)
+            lines.append("```")
+            lines.append("")
+            lines.append("## utun99")
+            lines.append("```")
+            lines.append(snap.system.utun)
+            lines.append("```")
+            lines.append("")
+            lines.append("## DNS (scutil --dns)")
+            lines.append("```")
+            lines.append(snap.system.dns)
+            lines.append("```")
+            lines.append("")
+            lines.append("## sing-box Log (tail 150)")
+            lines.append("```")
+            lines.append(snap.logs.singbox)
+            lines.append("```")
+            lines.append("")
+            lines.append("## Xray Log (tail 150)")
+            lines.append("```")
+            lines.append(snap.logs.xray)
+            lines.append("```")
+            lines.append("")
+            lines.append("## PF / Boot Log (tail 150)")
+            lines.append("```")
+            lines.append(snap.logs.pf)
+            lines.append("```")
+        }
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+        showToast("Markdown-отчёт скопирован в буфер", isError: false)
     }
 
     // MARK: - Launch At Login (Single LaunchAgent mechanism for ad-hoc builds)
