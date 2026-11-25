@@ -82,6 +82,7 @@ public final class VPNGuardViewModel: ObservableObject {
     private var isResumingFromPause: Bool = false
     private var isNetworkSatisfied: Bool = true
     private var isCheckingHealth: Bool = false
+    private var wakeGraceUntil: Date? = nil
     private var failoverAttemptedServerIds: Set<String> = []
 
     public init() {
@@ -196,8 +197,11 @@ public final class VPNGuardViewModel: ObservableObject {
                 guard satisfied else { return }
                 self.networkChangeTask?.cancel()
                 self.networkChangeTask = Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 1_200_000_000)
-                    guard let self, !Task.isCancelled else { return }
+                    // Debounce 2.5s (and honor 6s wake grace) to avoid spamming syncDns/syncPfEgress on Wi-Fi flaps
+                    let graceDelay = max(0.0, self?.wakeGraceUntil?.timeIntervalSinceNow ?? 0.0)
+                    let totalNs = UInt64(max(2.5, graceDelay) * 1_000_000_000.0)
+                    try? await Task.sleep(nanoseconds: totalNs)
+                    guard let self, !Task.isCancelled, self.isNetworkSatisfied else { return }
                     if self.isProtectionActive || self.service.isUtunInterfaceUp(name: "utun99") {
                         try? await self.service.syncDns()
                         try? await self.service.syncPfEgress()
@@ -361,6 +365,7 @@ public final class VPNGuardViewModel: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                self.wakeGraceUntil = Date().addingTimeInterval(6.0)
                 if let end = self.pauseEndDate, end.timeIntervalSinceNow <= 0 {
                     await self.handlePauseExpiration()
                 } else if let localEnd = self.service.readLocalPauseUntil() {
@@ -369,6 +374,9 @@ public final class VPNGuardViewModel: ObservableObject {
                     try? await self.service.resumeIfExpired()
                     await self.refreshStatus(fast: true)
                 }
+                // Re-probe tunnel health cleanly once Wi-Fi settles after 6s wake grace
+                try? await Task.sleep(nanoseconds: 6_200_000_000)
+                await self.runTunnelHealthCheck(allowFailover: true)
             }
         }
     }
@@ -756,6 +764,9 @@ public final class VPNGuardViewModel: ObservableObject {
                 tunnelHealthOk = nil
                 tunnelLatencyMs = nil
             }
+            return
+        }
+        if let wakeGrace = wakeGraceUntil, wakeGrace.timeIntervalSinceNow > 0 {
             return
         }
         guard !isCheckingHealth else { return }

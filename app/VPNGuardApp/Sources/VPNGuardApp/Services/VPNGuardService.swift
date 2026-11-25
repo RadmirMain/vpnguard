@@ -398,14 +398,17 @@ public final class VPNGuardService {
 
     // MARK: - Real Upstream Tunnel Health Probe (via 127.0.0.1:18089)
     public func measureTunnelHealth() async -> (ok: Bool, latencyMs: Int?, error: String?) {
-        guard let url = URL(string: "https://cp.cloudflare.com/generate_204") else {
-            return (false, nil, "Invalid probe URL")
-        }
+        let probeUrls = [
+            "https://cp.cloudflare.com/generate_204",
+            "https://www.gstatic.com/generate_204"
+        ]
 
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 4.0
         config.timeoutIntervalForResource = 5.0
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.urlCache = nil
+        config.httpMaximumConnectionsPerHost = 1
         config.connectionProxyDictionary = [
             kCFNetworkProxiesHTTPEnable as String: true,
             kCFNetworkProxiesHTTPProxy as String: "127.0.0.1",
@@ -418,22 +421,29 @@ public final class VPNGuardService {
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
 
-        var req = URLRequest(url: url)
-        req.httpMethod = "GET"
-        req.timeoutInterval = 4.0
+        var lastError: String? = nil
+        for rawUrl in probeUrls {
+            guard let url = URL(string: rawUrl) else { continue }
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.timeoutInterval = 4.0
+            req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            req.setValue("close", forHTTPHeaderField: "Connection")
 
-        let started = Date()
-        do {
-            let (_, response) = try await session.data(for: req)
-            let ms = max(1, Int(round(Date().timeIntervalSince(started) * 1000.0)))
-            if let http = response as? HTTPURLResponse, (200...399).contains(http.statusCode) {
-                return (true, ms, nil)
+            let started = Date()
+            do {
+                let (_, response) = try await session.data(for: req)
+                let ms = max(1, Int(round(Date().timeIntervalSince(started) * 1000.0)))
+                if let http = response as? HTTPURLResponse, (200...399).contains(http.statusCode) {
+                    return (true, ms, nil)
+                }
+                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                lastError = "HTTP \(code)"
+            } catch {
+                lastError = error.localizedDescription
             }
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            return (false, nil, "HTTP \(code)")
-        } catch {
-            return (false, nil, error.localizedDescription)
         }
+        return (false, nil, lastError ?? "Tunnel health probe failed")
     }
 
     public func sendUserNotification(title: String, message: String) {

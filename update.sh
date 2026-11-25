@@ -100,7 +100,21 @@ if [[ -d "${SCRIPT_DIR}/.git" ]]; then
     fi
     if [[ "${DO_PULL}" -eq 1 ]] && git remote get-url origin &>/dev/null; then
         if [[ "${CHECK_ONLY}" -eq 1 ]]; then
-            git fetch --quiet origin 2>/dev/null || true
+            python3 -c '
+import os, subprocess, sys
+env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+try:
+    subprocess.run(
+        ["git", "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=5", "fetch", "--quiet", "origin"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+        check=False,
+    )
+except Exception:
+    pass
+' 2>/dev/null || true
             if git rev-parse --abbrev-ref '@{u}' &>/dev/null; then
                 REMOTE_AHEAD_COUNT="$(git rev-list --count 'HEAD..@{u}' 2>/dev/null || echo 0)"
             fi

@@ -68,6 +68,48 @@ class TestServerPing(unittest.TestCase):
         self.assertFalse(data[1]["reachable"])
         self.assertIsNone(data[1]["latencyMs"])
 
+    def test_dns_a_query_build_and_parse_response(self):
+        import socket, struct
+        tx_id = 0x1234
+        query = vpnguard._build_dns_a_query("relay.example.com", tx_id)
+        self.assertGreater(len(query), 12)
+
+        # Build synthetic DNS response with pointer compression (0xC0 0x0C) to QNAME
+        question_part = query[12:]
+        header = struct.pack("!HHHHHH", tx_id, 0x8180, 1, 1, 0, 0)
+        answer = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + socket.inet_aton("203.0.113.77")
+        resp = header + question_part + answer
+
+        ips = vpnguard._parse_dns_a_response(resp, tx_id)
+        self.assertEqual(ips, ["203.0.113.77"])
+        self.assertEqual(vpnguard._parse_dns_a_response(resp, tx_id + 1), [])
+
+    def test_cmd_server_sync_pf_uses_direct_gid890_dns_bypass(self):
+        store = {
+            "activeId": "s1",
+            "servers": [
+                {"id": "s1", "name": "Relay", "host": "relay.example.com", "resolvedIps": ["203.0.113.10"], "port": 443}
+            ],
+        }
+        buf = io.StringIO()
+        with mock.patch("os.path.exists", return_value=True), \
+             mock.patch.object(vpnguard, "load_servers_store", return_value=store), \
+             mock.patch.object(vpnguard, "resolve_ipv4_direct_via_gid890", return_value=["203.0.113.88"]) as dns_mock, \
+             mock.patch.object(vpnguard, "apply_pf_egress", return_value=(True, "Loaded")) as pf_mock, \
+             mock.patch.object(vpnguard, "save_servers_store"), \
+             mock.patch.object(vpnguard, "build_singbox_config", return_value={"route": {"final": "xray-upstream"}}), \
+             mock.patch.object(vpnguard, "atomic_write_text"), \
+             mock.patch("subprocess.run", return_value=mock.MagicMock(returncode=1)), \
+             redirect_stdout(buf):
+            rc = vpnguard.cmd_server_sync_pf(argparse.Namespace())
+
+        self.assertEqual(rc, 0)
+        dns_mock.assert_called_once_with("relay.example.com")
+        pf_mock.assert_called_once_with(["203.0.113.88"], 443)
+        out = json.loads(buf.getvalue())
+        self.assertTrue(out["ipsChanged"])
+        self.assertEqual(out["ips"], ["203.0.113.88"])
+
 
 if __name__ == "__main__":
     unittest.main()

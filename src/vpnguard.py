@@ -31,10 +31,11 @@ import uuid
 import copy
 import ipaddress
 import grp
+import pwd
 import struct
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Callable
 
 VERSION = "3.0.0"
 
@@ -2700,18 +2701,271 @@ def cmd_server_delete(args: argparse.Namespace) -> int:
     return 0
 
 
+def _skip_dns_name(packet: bytes, offset: int) -> int:
+    """Advance past a DNS QNAME/NAME (handling pointer compression safely)."""
+    hops = 0
+    cur = offset
+    n = len(packet)
+    while cur < n and hops < 32:
+        length = packet[cur]
+        if length == 0:
+            return cur + 1
+        if (length & 0xC0) == 0xC0:
+            if cur + 1 >= n:
+                raise ValueError("Truncated DNS compression pointer")
+            return cur + 2
+        cur += 1 + length
+        hops += 1
+    raise ValueError("Malformed DNS name")
+
+
+def _build_dns_a_query(hostname: str, tx_id: int) -> bytes:
+    """Build a standard RFC 1035 UDP DNS A-record query packet."""
+    clean = hostname.strip().rstrip(".")
+    if not clean:
+        raise ValueError("Empty hostname")
+    header = struct.pack("!HHHHHH", tx_id & 0xFFFF, 0x0100, 1, 0, 0, 0)
+    qname_parts: List[bytes] = []
+    for label in clean.split("."):
+        encoded = label.encode("idna")
+        if not (1 <= len(encoded) <= 63):
+            raise ValueError(f"Invalid DNS label length in '{hostname}'")
+        qname_parts.append(bytes([len(encoded)]) + encoded)
+    qname = b"".join(qname_parts) + b"\x00"
+    question = qname + struct.pack("!HH", 1, 1)  # QTYPE=A, QCLASS=IN
+    return header + question
+
+
+def _parse_dns_a_response(packet: bytes, expected_tx_id: int) -> List[str]:
+    """Parse IPv4 A records from a raw DNS UDP response packet."""
+    if len(packet) < 12:
+        return []
+    tx_id, flags, qdcount, ancount, _, _ = struct.unpack("!HHHHHH", packet[:12])
+    if tx_id != (expected_tx_id & 0xFFFF):
+        return []
+    if (flags & 0x000F) != 0:
+        return []
+
+    offset = 12
+    for _ in range(qdcount):
+        offset = _skip_dns_name(packet, offset) + 4
+        if offset > len(packet):
+            return []
+
+    ips: List[str] = []
+    for _ in range(ancount):
+        offset = _skip_dns_name(packet, offset)
+        if offset + 10 > len(packet):
+            break
+        rtype, rclass, _, rdlength = struct.unpack("!HHIH", packet[offset:offset + 10])
+        offset += 10
+        if offset + rdlength > len(packet):
+            break
+        if rtype == 1 and rclass == 1 and rdlength == 4:
+            ip_str = socket.inet_ntoa(packet[offset:offset + 4])
+            if ip_str not in ips:
+                ips.append(ip_str)
+        offset += rdlength
+    return ips
+
+
+def _run_in_gid890_worker(fn: Callable[[], Any]) -> Any:
+    """
+    Execute fn inside a short-lived forked child dropped to GID 890 + UID nobody.
+    PF allows group 890 direct IPv4 TCP/UDP egress bypassing utun99 when bound via IP_BOUND_IF.
+    """
+    if os.geteuid() != 0:
+        return fn()
+
+    nobody_uid = 65534
+    try:
+        nobody_uid = pwd.getpwnam("nobody").pw_uid
+    except KeyError:
+        pass
+
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        try:
+            try:
+                os.setgroups([890])
+                os.setgid(890)
+                os.setuid(nobody_uid)
+            except Exception:
+                pass
+            payload = json.dumps({"ok": True, "result": fn()}, ensure_ascii=False).encode("utf-8")
+            os.write(write_fd, payload)
+        except Exception as e:
+            try:
+                os.write(write_fd, json.dumps({"ok": False, "error": str(e)}).encode("utf-8"))
+            except Exception:
+                pass
+        finally:
+            try:
+                os.close(write_fd)
+            except Exception:
+                pass
+            os._exit(0)
+
+    os.close(write_fd)
+    chunks: List[bytes] = []
+    try:
+        while True:
+            chunk = os.read(read_fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(read_fd)
+        try:
+            os.waitpid(pid, 0)
+        except Exception:
+            pass
+
+    raw = b"".join(chunks).decode("utf-8", errors="replace").strip()
+    if not raw:
+        return None
+    parsed = json.loads(raw)
+    if not parsed.get("ok"):
+        raise RuntimeError(parsed.get("error", "GID 890 worker failed"))
+    return parsed.get("result")
+
+
+def resolve_ipv4_direct_via_gid890(
+    hostname: str,
+    dns_servers: Tuple[str, ...] = ("1.1.1.1", "8.8.8.8"),
+    timeout: float = 2.5,
+) -> List[str]:
+    """
+    Resolve hostname A records via direct UDP DNS (1.1.1.1 / 8.8.8.8) using GID 890 + IP_BOUND_IF,
+    avoiding mDNSResponder / dead utun99 during failover or tunnel outages.
+    """
+    host = hostname.strip()
+    if not host:
+        return []
+    try:
+        if ipaddress.ip_address(host).version == 4:
+            return [host]
+    except ValueError:
+        pass
+
+    iface = _get_physical_default_interface()
+    if_index: Optional[int] = None
+    if iface:
+        try:
+            if_index = socket.if_nametoindex(iface)
+        except Exception:
+            if_index = None
+
+    def _query_dns() -> List[str]:
+        tx_id = secrets.randbelow(65535) + 1
+        query = _build_dns_a_query(host, tx_id)
+        for dns_ip in dns_servers:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(timeout)
+            try:
+                if if_index is not None and if_index > 0:
+                    try:
+                        sock.setsockopt(socket.IPPROTO_IP, IP_BOUND_IF_DARWIN, struct.pack("I", if_index))
+                    except OSError:
+                        pass
+                sock.sendto(query, (dns_ip, 53))
+                resp, _ = sock.recvfrom(2048)
+                ips = _parse_dns_a_response(resp, tx_id)
+                if ips:
+                    return ips
+            except Exception:
+                continue
+            finally:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        return []
+
+    try:
+        res = _run_in_gid890_worker(_query_dns)
+        return res if isinstance(res, list) else []
+    except Exception:
+        return []
+
+
 def cmd_server_sync_pf(args: argparse.Namespace) -> int:
-    """Generate pf.egress.conf from active server/xray.json and load vpnguard/egress."""
-    ips, port = get_active_relay_endpoint()
+    """
+    Re-resolve active relay domain directly via GID 890 + IP_BOUND_IF (bypassing utun99),
+    refresh pf.egress.conf & vpnguard/egress, and update sing-box.json if relay IP rotated.
+    """
+    store = load_servers_store() if os.path.exists(SERVERS_FILE_PATH) else None
+    active_srv = None
+    host = ""
+    port = 443
+    prev_ips: List[str] = []
+
+    if store:
+        active_id = store.get("activeId")
+        for s in store.get("servers", []):
+            if s.get("id") == active_id:
+                active_srv = s
+                host = str(s.get("host", "")).strip()
+                port = int(s.get("port", 443))
+                prev_ips = [str(x).strip() for x in (s.get("resolvedIps") or []) if str(x).strip()]
+                break
+
+    if not host and os.path.exists(XRAY_CONF_PATH):
+        try:
+            with open(XRAY_CONF_PATH, "r", encoding="utf-8") as xf:
+                host, port = _extract_xray_endpoint(json.load(xf))
+        except Exception:
+            pass
+
+    ips: List[str] = []
+    if host:
+        ips = resolve_ipv4_direct_via_gid890(host)
+
+    if not ips:
+        ips = prev_ips
+    if not ips:
+        ips, port = get_active_relay_endpoint()
     if not ips:
         print(json.dumps({"status": "error", "message": "No active relay endpoint found"}), file=sys.stderr)
         return 1
+
     ok, msg = apply_pf_egress(ips, port)
-    if ok:
-        print(json.dumps({"status": "ok", "ips": ips, "port": port, "message": msg}))
-        return 0
-    print(json.dumps({"status": "error", "message": msg}), file=sys.stderr)
-    return 1
+    if not ok:
+        print(json.dumps({"status": "error", "message": msg}), file=sys.stderr)
+        return 1
+
+    ips_changed = (ips != prev_ips)
+    if store and active_srv is not None and ips_changed:
+        active_srv["resolvedIps"] = ips
+        try:
+            save_servers_store(store)
+        except Exception:
+            pass
+
+        # Keep utun99 route_exclude_address in sync with rotated relay IP
+        try:
+            current_rules = DEFAULT_RULES
+            if os.path.exists(RULES_FILE_PATH):
+                with open(RULES_FILE_PATH, "r", encoding="utf-8") as rf:
+                    current_rules = json.load(rf)
+            updated_sb = build_singbox_config(current_rules, relay_ip=ips)
+            tmp_sb = f"{SINGBOX_CONF_PATH}.tmp_{os.getpid()}"
+            atomic_write_text(tmp_sb, json.dumps(updated_sb, indent=2, ensure_ascii=False), mode=0o600)
+            sb_bin = SINGBOX_BIN if os.path.exists(SINGBOX_BIN) else "sing-box"
+            if subprocess.run([sb_bin, "check", "-c", tmp_sb], capture_output=True).returncode == 0:
+                os.replace(tmp_sb, SINGBOX_CONF_PATH)
+                os.chmod(SINGBOX_CONF_PATH, 0o600)
+                if get_singbox_process_status().get("running"):
+                    subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True)
+            elif os.path.exists(tmp_sb):
+                os.remove(tmp_sb)
+        except Exception:
+            pass
+
+    print(json.dumps({"status": "ok", "ips": ips, "port": port, "ipsChanged": ips_changed, "message": msg}))
+    return 0
 
 
 IP_BOUND_IF_DARWIN = 25
@@ -2853,55 +3107,8 @@ def ping_servers_via_gid890(servers: List[Dict[str, Any]], timeout: float = 2.0)
         with ThreadPoolExecutor(max_workers=min(8, len(prepared))) as pool:
             return list(pool.map(_probe_one, prepared))
 
-    if os.geteuid() != 0:
-        return _run_probes()
-
-    read_fd, write_fd = os.pipe()
-    pid = os.fork()
-    if pid == 0:
-        os.close(read_fd)
-        try:
-            try:
-                os.setgroups([890])
-                os.setgid(890)
-            except Exception:
-                pass
-            payload = json.dumps(_run_probes(), ensure_ascii=False).encode("utf-8")
-            os.write(write_fd, payload)
-        except Exception as e:
-            try:
-                os.write(write_fd, json.dumps({"error": str(e)}).encode("utf-8"))
-            except Exception:
-                pass
-        finally:
-            try:
-                os.close(write_fd)
-            except Exception:
-                pass
-            os._exit(0)
-
-    os.close(write_fd)
-    chunks: List[bytes] = []
-    try:
-        while True:
-            chunk = os.read(read_fd, 65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-    finally:
-        os.close(read_fd)
-        try:
-            os.waitpid(pid, 0)
-        except Exception:
-            pass
-
-    raw = b"".join(chunks).decode("utf-8", errors="replace").strip()
-    if not raw:
-        return []
-    parsed = json.loads(raw)
-    if isinstance(parsed, dict) and "error" in parsed:
-        raise RuntimeError(parsed["error"])
-    return parsed
+    res = _run_in_gid890_worker(_run_probes)
+    return res if isinstance(res, list) else []
 
 
 def cmd_server_ping(args: argparse.Namespace) -> int:
