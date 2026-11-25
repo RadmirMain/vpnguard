@@ -1,0 +1,47 @@
+import SwiftUI
+import AppKit
+
+@main
+public struct VPNGuardApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @StateObject private var vm = VPNGuardViewModel()
+    @Environment(\.openWindow) private var openWindow
+    
+    public init() {}
+    
+    public var body: some Scene {
+        // Menu Bar Extra Item
+        MenuBarExtra {
+            MenuBarExtraView(vm: vm) {
+                openControlCenter()
+            }
+        } label: {
+            Image(systemName: vm.isProtectionActive ? "shield.fill" : "shield.slash.fill")
+                .foregroundColor(vm.isProtectionActive ? .green : .secondary)
+        }
+        .menuBarExtraStyle(.window)
+        
+        // Main Control Center Window
+        Window("VPNGuard Control Center", id: "control-center") {
+            MainContainerView(vm: vm)
+        }
+        .defaultSize(width: 860, height: 580)
+        .commands {
+            CommandGroup(replacing: .textEditing) {
+                Button("Вырезать") { NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("x", modifiers: .command)
+                Button("Скопировать") { NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("c", modifiers: .command)
+                Button("Вставить") { NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("v", modifiers: .command)
+                Button("Выбрать все") { NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil) }
+                    .keyboardShortcut("a", modifiers: .command)
+            }
+        }
+    }
+    
+    private func openControlCenter() {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "control-center")
+    }
+}

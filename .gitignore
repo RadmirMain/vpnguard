@@ -1,0 +1,33 @@
+# VPNGuard gitignore
+# Credentials and sensitive configuration
+src/xray/xray.json
+src/servers.json
+servers.json
+*.key
+*.pem
+*.secret
+
+# Logs
+*.log
+/var/log/vpnguard*.log
+
+# Compiled artifacts and caches
+bin/vpnguard-xray
+bin/vpnguard-exec
+__pycache__/
+*.py[cod]
+*$py.class
+.DS_Store
+
+# SwiftPM & Xcode / App bundles
+.build/
+**/.build/
+.swiftpm/
+**/.swiftpm/
+*.xcresult
+app/VPNGuardApp/VPNGuard.app/
+*.app/
+
+# Scratch files
+*.bak
+*.tmp

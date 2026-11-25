@@ -1,0 +1,122 @@
+{
+  "apps": [
+    {
+      "id": "app-claude",
+      "name": "Claude",
+      "bundlePath": "/Applications/Claude.app",
+      "action": "proxy",
+      "enabled": true
+    },
+    {
+      "id": "app-codex",
+      "name": "Codex",
+      "bundlePath": "/Applications/Codex.app",
+      "action": "proxy",
+      "enabled": true
+    },
+    {
+      "id": "app-cursor",
+      "name": "Cursor",
+      "bundlePath": "/Applications/Cursor.app",
+      "action": "proxy",
+      "enabled": true
+    }
+  ],
+  "domains": [
+    {
+      "id": "dom-anthropic",
+      "domain": "anthropic.com",
+      "action": "proxy",
+      "enabled": true
+    },
+    {
+      "id": "dom-claude",
+      "domain": "claude.ai",
+      "action": "proxy",
+      "enabled": true
+    },
+    {
+      "id": "dom-openai",
+      "domain": "openai.com",
+      "action": "proxy",
+      "enabled": true
+    },
+    {
+      "id": "dom-chatgpt",
+      "domain": "chatgpt.com",
+      "action": "proxy",
+      "enabled": true
+    },
+    {
+      "id": "dom-oaistatic",
+      "domain": "oaistatic.com",
+      "action": "proxy",
+      "enabled": true
+    },
+    {
+      "id": "dom-oaiusercontent",
+      "domain": "oaiusercontent.com",
+      "action": "proxy",
+      "enabled": true
+    },
+    {
+      "id": "dom-cursor-sh",
+      "domain": "cursor.sh",
+      "action": "proxy",
+      "enabled": true
+    },
+    {
+      "id": "dom-cursor-com",
+      "domain": "cursor.com",
+      "action": "proxy",
+      "enabled": true
+    },
+    {
+      "id": "dom-github",
+      "domain": "github.com",
+      "action": "proxy",
+      "enabled": true
+    },
+    {
+      "id": "dom-githubusercontent",
+      "domain": "githubusercontent.com",
+      "action": "proxy",
+      "enabled": true
+    },
+    {
+      "id": "dom-ru",
+      "domain": ".ru",
+      "action": "direct",
+      "enabled": true
+    },
+    {
+      "id": "dom-rf",
+      "domain": ".рф",
+      "action": "direct",
+      "enabled": true
+    },
+    {
+      "id": "dom-p1ai",
+      "domain": ".xn--p1ai",
+      "action": "direct",
+      "enabled": true
+    },
+    {
+      "id": "dom-su",
+      "domain": ".su",
+      "action": "direct",
+      "enabled": true
+    },
+    {
+      "id": "dom-2gis",
+      "domain": "2gis.com",
+      "action": "direct",
+      "enabled": true
+    }
+  ],
+  "presets": {
+    "aiServicesProxy": true,
+    "ruDirect": true,
+    "blockQuic": true
+  }
+}

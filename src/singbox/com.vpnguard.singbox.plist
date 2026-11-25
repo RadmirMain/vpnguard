@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vpnguard.singbox</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/libexec/vpnguard-singbox</string>
+        <string>run</string>
+        <string>-c</string>
+        <string>/usr/local/etc/vpnguard/sing-box.json</string>
+    </array>
+
+    <key>UserName</key>
+    <string>root</string>
+
+    <key>GroupName</key>
+    <string>vpnguard-tun</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/vpnguard-singbox.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/vpnguard-singbox.log</string>
+</dict>
+</plist>

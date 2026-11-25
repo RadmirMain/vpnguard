@@ -1,0 +1,24 @@
+#!/bin/bash
+# ==============================================================================
+# vpnguard - Entrypoint executable wrapper
+# ==============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="/usr/bin/python3"
+
+# 1. Local repo check (when running directly from git repository checkout)
+REPO_SRC="${SCRIPT_DIR}/../src/vpnguard.py"
+if [[ -f "${REPO_SRC}" ]]; then
+    exec "${PYTHON_BIN}" -s "${REPO_SRC}" "$@"
+fi
+
+# 2. System-wide installed location
+SYSTEM_SRC="/usr/local/share/vpnguard/src/vpnguard.py"
+if [[ -f "${SYSTEM_SRC}" ]]; then
+    exec "${PYTHON_BIN}" -s "${SYSTEM_SRC}" "$@"
+fi
+
+echo "[!] Error: Could not locate vpnguard.py!" >&2
+echo "[i] Please run: sudo ./install.sh" >&2
+exit 1

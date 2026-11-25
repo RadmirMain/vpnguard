@@ -1,0 +1,243 @@
+{
+  "activeId": "server-primary-example",
+  "servers": [
+    {
+      "id": "server-primary-example",
+      "name": "🇷🇺 Основной релей (xhttp)",
+      "protocol": "vless",
+      "host": "203.0.113.10",
+      "resolvedIps": [
+        "203.0.113.10"
+      ],
+      "port": 443,
+      "transport": "xhttp",
+      "security": "tls",
+      "sni": "example-relay.domain.com",
+      "flow": "",
+      "rawUri": "",
+      "xrayConfig": {
+        "log": {
+          "access": "none",
+          "error": "/var/log/vpnguard-xray.log",
+          "loglevel": "warning"
+        },
+        "inbounds": [
+          {
+            "tag": "socks-in",
+            "port": 18088,
+            "listen": "127.0.0.1",
+            "protocol": "socks",
+            "settings": {
+              "auth": "noauth",
+              "udp": false
+            }
+          },
+          {
+            "tag": "http-in",
+            "port": 18089,
+            "listen": "127.0.0.1",
+            "protocol": "http",
+            "settings": {
+              "allowTransparent": false
+            }
+          }
+        ],
+        "outbounds": [
+          {
+            "tag": "proxy",
+            "protocol": "vless",
+            "settings": {
+              "vnext": [
+                {
+                  "address": "203.0.113.10",
+                  "port": 443,
+                  "users": [
+                    {
+                      "id": "REPLACE_WITH_UUID",
+                      "encryption": "none",
+                      "level": 8
+                    }
+                  ]
+                }
+              ]
+            },
+            "streamSettings": {
+              "network": "xhttp",
+              "security": "tls",
+              "tlsSettings": {
+                "allowInsecure": false,
+                "alpn": [
+                  "h2",
+                  "h3"
+                ],
+                "fingerprint": "edge",
+                "serverName": "example-relay.domain.com",
+                "show": false
+              },
+              "xhttpSettings": {
+                "host": "example-relay.domain.com",
+                "path": "/api/v2/",
+                "mode": "auto",
+                "extra": {
+                  "noGRPCHeader": false,
+                  "scMaxEachPostBytes": 1000000,
+                  "scMinPostsIntervalMs": 30,
+                  "scStreamUpServerSecs": "20-80",
+                  "xPaddingBytes": "100-1000",
+                  "xmux": {
+                    "cMaxReuseTimes": 0,
+                    "hKeepAlivePeriod": 30,
+                    "hMaxRequestTimes": "600-900",
+                    "hMaxReusableSecs": "1800-3000",
+                    "maxConnections": 1
+                  }
+                }
+              }
+            }
+          },
+          {
+            "tag": "block",
+            "protocol": "blackhole",
+            "settings": {
+              "response": {
+                "type": "none"
+              }
+            }
+          }
+        ],
+        "routing": {
+          "domainStrategy": "AsIs",
+          "rules": [
+            {
+              "type": "field",
+              "inboundTag": [
+                "socks-in",
+                "http-in"
+              ],
+              "outboundTag": "proxy"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "server-india-example",
+      "name": "🇮🇳 Индия [Gemini] 9972",
+      "protocol": "vless",
+      "host": "203.0.113.20",
+      "resolvedIps": [
+        "203.0.113.20"
+      ],
+      "port": 443,
+      "transport": "xhttp",
+      "security": "tls",
+      "sni": "example-india.domain.com",
+      "flow": "",
+      "rawUri": "",
+      "xrayConfig": {
+        "log": {
+          "access": "none",
+          "error": "/var/log/vpnguard-xray.log",
+          "loglevel": "warning"
+        },
+        "inbounds": [
+          {
+            "tag": "socks-in",
+            "port": 18088,
+            "listen": "127.0.0.1",
+            "protocol": "socks",
+            "settings": {
+              "auth": "noauth",
+              "udp": false
+            }
+          },
+          {
+            "tag": "http-in",
+            "port": 18089,
+            "listen": "127.0.0.1",
+            "protocol": "http",
+            "settings": {
+              "allowTransparent": false
+            }
+          }
+        ],
+        "outbounds": [
+          {
+            "tag": "proxy",
+            "protocol": "vless",
+            "settings": {
+              "vnext": [
+                {
+                  "address": "203.0.113.20",
+                  "port": 443,
+                  "users": [
+                    {
+                      "encryption": "none",
+                      "id": "REPLACE_WITH_UUID",
+                      "level": 8
+                    }
+                  ]
+                }
+              ]
+            },
+            "streamSettings": {
+              "network": "xhttp",
+              "security": "tls",
+              "tlsSettings": {
+                "allowInsecure": false,
+                "alpn": [
+                  "h2",
+                  "h3"
+                ],
+                "fingerprint": "edge",
+                "serverName": "example-india.domain.com",
+                "show": false
+              },
+              "xhttpSettings": {
+                "extra": {
+                  "noGRPCHeader": false,
+                  "scMaxEachPostBytes": 1000000,
+                  "scMinPostsIntervalMs": 30,
+                  "scStreamUpServerSecs": "20-80",
+                  "xmux": {
+                    "cMaxReuseTimes": 0,
+                    "hKeepAlivePeriod": 30,
+                    "hMaxRequestTimes": "600-900",
+                    "hMaxReusableSecs": "1800-3000",
+                    "maxConnections": 1
+                  },
+                  "xPaddingBytes": "100-1000"
+                },
+                "host": "example-india.domain.com",
+                "mode": "auto",
+                "path": "/api/v2/"
+              }
+            }
+          },
+          {
+            "tag": "block",
+            "protocol": "blackhole",
+            "settings": {
+              "response": {
+                "type": "none"
+              }
+            }
+          }
+        ],
+        "routing": {
+          "domainStrategy": "AsIs",
+          "rules": [
+            {
+              "type": "field",
+              "inboundTag": [
+                "socks-in",
+                "http-in"
+              ],
+              "outboundTag": "proxy"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+import XCTest
+@testable import VPNGuardApp
+
+final class VPNGuardAppTests: XCTestCase {
+    func testVlessParserRealityValid() {
+        let uri = "vless://a3b98c76-2f1d-4e5a-8b9c-123456789abc@1.2.3.4:8443?security=reality&type=tcp&flow=xtls-rprx-vision&pbk=abc123&sni=www.microsoft.com#Germany%20VPS"
+        let result = VlessPreviewParser.parse(uri: uri)
+        switch result {
+        case .success(let preview):
+            XCTAssertEqual(preview.name, "Germany VPS")
+            XCTAssertEqual(preview.host, "1.2.3.4")
+            XCTAssertEqual(preview.port, 8443)
+            XCTAssertEqual(preview.transport, "tcp")
+            XCTAssertEqual(preview.security, "reality")
+            XCTAssertEqual(preview.sni, "www.microsoft.com")
+            XCTAssertEqual(preview.flow, "xtls-rprx-vision")
+        case .failure(let err):
+            XCTFail("Unexpected parse failure: \(err)")
+        }
+    }
+
+    func testVlessParserRejectsInvalidPort() {
+        let uri = "vless://a3b98c76-2f1d-4e5a-8b9c-123456789abc@1.2.3.4:99999?security=tls#BadPort"
+        let result = VlessPreviewParser.parse(uri: uri)
+        if case .success = result {
+            XCTFail("Expected invalid port 99999 to fail")
+        }
+    }
+
+    func testVlessParserJsonOutbound() {
+        let json = """
+        {
+          "remarks": "India XHTTP",
+          "outbounds": [{
+            "protocol": "vless",
+            "settings": { "vnext": [{ "address": "203.0.113.20", "port": 443, "users": [{"id": "00000000-0000-4000-8000-000000000002"}] }] },
+            "streamSettings": { "network": "xhttp", "security": "tls", "tlsSettings": {"serverName": "cdn.example.com"} }
+          }]
+        }
+        """
+        let result = VlessPreviewParser.parse(uri: json)
+        switch result {
+        case .success(let preview):
+            XCTAssertEqual(preview.name, "India XHTTP")
+            XCTAssertEqual(preview.host, "203.0.113.20")
+            XCTAssertEqual(preview.transport, "xhttp")
+            XCTAssertEqual(preview.sni, "cdn.example.com")
+        case .failure(let err):
+            XCTFail("Unexpected JSON parse failure: \(err)")
+        }
+    }
+
+    func testClashConnectionHelpers() {
+        let meta = ClashMetadata(
+            network: "tcp",
+            destinationIP: "1.1.1.1",
+            destinationPort: "443",
+            host: "api.anthropic.com",
+            processPath: "/Applications/Claude.app/Contents/MacOS/Claude"
+        )
+        let conn = ClashConnection(
+            id: "1",
+            metadata: meta,
+            upload: 100,
+            download: 200,
+            start: "2026-11-25T12:00:00Z",
+            chains: ["xray-upstream"]
+        )
+        XCTAssertTrue(conn.isProxy)
+        XCTAssertEqual(conn.processName, "Claude")
+        XCTAssertEqual(conn.destinationDisplay, "api.anthropic.com:443")
+    }
+}

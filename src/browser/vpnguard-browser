@@ -1,0 +1,80 @@
+#!/bin/bash
+# ==============================================================================
+# vpnguard-browser - Hardened OAuth Browser Sandbox for VPNGuard 3.0
+# Guarantees zero IP/DNS leaks during OAuth authorization and link clicks.
+# ==============================================================================
+set -euo pipefail
+
+# 1. Enforce GID 888 sandbox jail
+CURRENT_GID=$(id -g)
+if [[ "${CURRENT_GID}" != "888" ]]; then
+    EXEC_HELPER="/usr/local/bin/vpnguard-exec"
+    if [[ ! -x "${EXEC_HELPER}" ]]; then
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+        EXEC_HELPER="${SCRIPT_DIR}/bin/vpnguard-exec"
+    fi
+
+    if [[ -x "${EXEC_HELPER}" ]]; then
+        exec "${EXEC_HELPER}" "$0" "$@"
+    else
+        echo "[!] VPNGuard Browser Error: Not in group 888 and vpnguard-exec not found!" >&2
+        exit 1
+    fi
+fi
+
+# 2. Proxy configuration & isolated profile directory (root:vpnguard 0770)
+PROXY_PORT="18089"
+PROFILE_DIR="/var/db/vpnguard/browser-profile"
+
+if [[ ! -d "${PROFILE_DIR}" || ! -w "${PROFILE_DIR}" ]]; then
+    echo "[!] VPNGuard Browser Fatal: Isolated profile directory ${PROFILE_DIR} is missing or not writable by GID 888!" >&2
+    echo "[!] Please run 'sudo ./install.sh' to initialize ${PROFILE_DIR} (0770 root:vpnguard)." >&2
+    exit 1
+fi
+
+# Fail-Closed SingletonLock IPC check: ensure no non-888 browser process holds this profile
+EXISTING_PIDS=$(pgrep -f "user-data-dir=${PROFILE_DIR}" || true)
+if [[ -n "${EXISTING_PIDS}" ]]; then
+    for pid in ${EXISTING_PIDS}; do
+        proc_gid=$(ps -o gid= -p "${pid}" 2>/dev/null | tr -d ' ' || true)
+        if [[ -n "${proc_gid}" && "${proc_gid}" != "888" ]]; then
+            echo "[!] SECURITY ABORT: Browser process PID ${pid} holds ${PROFILE_DIR} outside GID 888 (GID=${proc_gid})!" >&2
+            echo "[!] Close that browser instance and reboot/re-login if your session still holds group 888." >&2
+            exit 1
+        fi
+    done
+fi
+
+# 3. Locate Chromium Mach-O binary
+CHROME_BIN=""
+for cand in \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
+    "/Applications/Chromium.app/Contents/MacOS/Chromium"; do
+    if [[ -f "${cand}" ]]; then
+        CHROME_BIN="${cand}"
+        break
+    fi
+done
+
+# Strict Fail-Closed: Never fallback to open -a / Safari as it escapes GID 888 sandbox
+if [[ -z "${CHROME_BIN}" ]]; then
+    echo "[!] VPNGuard Browser Fatal: No Chromium-based browser found on system!" >&2
+    echo "[!] Fallback to Safari / open is strictly prohibited to prevent IP/DNS leaks." >&2
+    echo "[!] Please install Google Chrome, Brave, Edge, or Chromium." >&2
+    exit 1
+fi
+
+HARDENED_FLAGS=(
+    "--proxy-server=http://127.0.0.1:${PROXY_PORT}"
+    '--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1'
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+    "--disable-quic"
+    "--lang=en-US"
+    "--user-data-dir=${PROFILE_DIR}"
+    "--no-first-run"
+    "--no-default-browser-check"
+)
+
+exec "${CHROME_BIN}" "${HARDENED_FLAGS[@]}" "$@"

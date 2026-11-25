@@ -1,0 +1,42 @@
+{
+  "version": "2.0.0",
+  "proxy": {
+    "host": "127.0.0.1",
+    "socks_port": 18088,
+    "http_port": 18089,
+    "auto_detect_ports": [
+      {"socks": 18088, "http": 18089, "app": "VPNGuard Dedicated Xray"}
+    ]
+  },
+  "proxy_daemon": {
+    "user": "_vpnguard_proxy",
+    "group_name": "vpnguard-proxy",
+    "group_gid": 889,
+    "remote_exit_ip": "",
+    "remote_exit_port": 443
+  },
+  "firewall": {
+    "client_group_name": "vpnguard",
+    "client_group_gid": 888,
+    "proxy_group_name": "vpnguard-proxy",
+    "proxy_group_gid": 889,
+    "pf_anchor": "vpnguard",
+    "anchor_file": "/etc/pf.anchors/vpnguard",
+    "main_conf": "/etc/pf.conf"
+  },
+  "security": {
+    "blocked_countries": ["RU", "BY", "IR", "KP"],
+    "check_urls": [
+      "https://ipinfo.io/json",
+      "https://api.ipify.org?format=json"
+    ],
+    "fail_closed": true,
+    "timezone": "America/New_York",
+    "locale": "en_US.UTF-8"
+  },
+  "notifications": {
+    "enabled": true,
+    "notify_on_flap": true,
+    "notify_on_reconnect": true
+  }
+}

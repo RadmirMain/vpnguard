@@ -1,0 +1,29 @@
+#!/bin/bash
+# ==============================================================================
+# claude wrapper - Runs Claude Code inside VPNGuard fail-closed sandbox
+# ==============================================================================
+set -euo pipefail
+
+REAL_CLAUDE=""
+
+# Search for the real claude binary (skipping this wrapper)
+if [[ -f "${HOME}/.local/bin/claude" ]]; then
+    REAL_CLAUDE="${HOME}/.local/bin/claude"
+else
+    # Find in PATH excluding current script
+    REAL_CLAUDE=$(which -a claude | grep -v "$0" | head -n 1 || true)
+fi
+
+if [[ -z "${REAL_CLAUDE}" ]]; then
+    echo "[!] Error: Could not find original 'claude' binary in PATH or ~/.local/bin/claude" >&2
+    exit 1
+fi
+
+# If vpnguard CLI is installed
+if command -v vpnguard &>/dev/null; then
+    exec vpnguard run "${REAL_CLAUDE}" "$@"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
+    exec "${PROJECT_ROOT}/bin/vpnguard" run "${REAL_CLAUDE}" "$@"
+fi
