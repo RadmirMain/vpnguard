@@ -18,7 +18,7 @@ private struct GroupedTrafficEntry: Identifiable {
 public struct TrafficMonitorView: View {
     @ObservedObject var vm: VPNGuardViewModel
     @StateObject private var monitor = TrafficMonitorService.shared
-    
+
     @State private var searchText: String = ""
     @State private var selectedFilter: FilterRoute = .all
     @State private var groupByProcessAndHost: Bool = true
@@ -26,26 +26,25 @@ public struct TrafficMonitorView: View {
     @State private var showCloseAllAlert: Bool = false
     @State private var isHoveringList: Bool = false
     @State private var frozenConnections: [ClashConnection] = []
-    
+
     enum FilterRoute: String, CaseIterable, Identifiable {
         case all = "Все"
-        case proxy = "Прокси (Xray)"
-        case direct = "Прямые (Direct)"
-        
+        case proxy = "VPN"
+        case direct = "Direct"
+
         var id: String { rawValue }
     }
-    
+
     public init(vm: VPNGuardViewModel) {
         self.vm = vm
     }
-    
+
     private var sourceConnections: [ClashConnection] {
         isHoveringList ? frozenConnections : monitor.connections
     }
 
     private var filteredConnections: [ClashConnection] {
         sourceConnections.filter { conn in
-            // Filter by route
             switch selectedFilter {
             case .all:
                 break
@@ -54,8 +53,7 @@ public struct TrafficMonitorView: View {
             case .direct:
                 if conn.isProxy { return false }
             }
-            
-            // Search text filter
+
             if !searchText.isEmpty {
                 let query = searchText.lowercased()
                 let matchesProcess = conn.processName.lowercased().contains(query)
@@ -65,7 +63,7 @@ public struct TrafficMonitorView: View {
                 let matchesPort = conn.metadata.destinationPort?.contains(query) ?? false
                 return matchesProcess || matchesPath || matchesHost || matchesIp || matchesPort
             }
-            
+
             return true
         }
     }
@@ -98,25 +96,105 @@ public struct TrafficMonitorView: View {
         }
         .sorted { ($0.totalDownload + $0.totalUpload) > ($1.totalDownload + $1.totalUpload) }
     }
-    
-    public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                // Header & Connection Status
-                headerSection
-                
-                // Realtime Rate Metrics Grid
-                metricsGrid
-                
-                // Search & Filter Toolbar
-                filterBar
-                
-                // Active Connections List
-                connectionsSection
-            }
-            .padding(24)
+
+    private var headerSubtitle: String {
+        if monitor.isConnected {
+            return "Clash API подключён (127.0.0.1:9090)"
+        } else if let error = monitor.lastError {
+            return "Ошибка подключения: \(error)"
         }
-        .background(Color(NSColor.windowBackgroundColor))
+        return "Ожидание запуска sing-box…"
+    }
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            VGPageHeader(
+                title: "Монитор трафика",
+                subtitle: headerSubtitle
+            ) {
+                HStack(spacing: 8) {
+                    VGStatusBadge(
+                        monitor.isConnected ? "Подключено" : "Ожидание",
+                        tone: monitor.isConnected ? .protected : .warning,
+                        showDot: true
+                    )
+
+                    Button {
+                        if monitor.isMonitoring {
+                            monitor.stopMonitoring()
+                        } else {
+                            monitor.startMonitoring()
+                        }
+                    } label: {
+                        Label(
+                            monitor.isMonitoring ? "Пауза" : "Возобновить",
+                            systemImage: monitor.isMonitoring ? "pause.fill" : "play.fill"
+                        )
+                        .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button(role: .destructive) {
+                        showCloseAllAlert = true
+                    } label: {
+                        Label("Разорвать все", systemImage: "xmark.circle")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(monitor.connections.isEmpty)
+                }
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: VGTheme.sectionSpacing) {
+                    metricsGrid
+
+                    // Search, Filter & Grouping Toolbar (no acid green button)
+                    HStack(spacing: 10) {
+                        VGSearchField("Поиск по процессу, домену или IP…", text: $searchText)
+
+                        Picker("", selection: $selectedFilter) {
+                            ForEach(FilterRoute.allCases) { filter in
+                                Text(filter.rawValue).tag(filter)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(width: 210)
+                        .fixedSize()
+
+                        Button {
+                            withAnimation(.snappy(duration: 0.2)) {
+                                groupByProcessAndHost.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "square.stack.3d.up")
+                                    .font(.system(size: 11))
+                                Text("Группировать")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .foregroundStyle(groupByProcessAndHost ? .primary : .secondary)
+                            .background(
+                                RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
+                                    .fill(groupByProcessAndHost ? VGTheme.sidebarSelection : VGTheme.surfaceLevel1)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
+                                    .strokeBorder(VGTheme.borderSubtle, lineWidth: 0.75)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .help("Группировать повторяющиеся потоки по приложению и домену")
+                    }
+
+                    connectionsSection
+                }
+                .padding(VGTheme.pagePadding)
+            }
+        }
         .onAppear {
             if let url = vm.status.clashApiUrl, let secret = vm.status.clashApiSecret {
                 monitor.configure(url: url, secret: secret)
@@ -135,9 +213,7 @@ public struct TrafficMonitorView: View {
             }
             Button("Закрыть", role: .destructive) {
                 if let conn = connectionToClose {
-                    Task {
-                        await monitor.closeConnection(id: conn.id)
-                    }
+                    Task { await monitor.closeConnection(id: conn.id) }
                 }
                 connectionToClose = nil
             }
@@ -149,220 +225,102 @@ public struct TrafficMonitorView: View {
         .alert("Закрыть все соединения?", isPresented: $showCloseAllAlert) {
             Button("Отмена", role: .cancel) {}
             Button("Закрыть все", role: .destructive) {
-                Task {
-                    await monitor.closeAllConnections()
-                }
+                Task { await monitor.closeAllConnections() }
             }
         } message: {
             Text("Это действие принудительно разорвёт все текущие сетевые сессии, проходящие через sing-box.")
         }
     }
-    
-    // MARK: - Header
-    private var headerSection: some View {
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Монитор трафика")
-                    .font(.system(size: 24, weight: .bold))
-                
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(monitor.isConnected ? Color.green : Color.orange)
-                        .frame(width: 8, height: 8)
-                    
-                    if monitor.isConnected {
-                        Text("Подключено к sing-box Clash API (127.0.0.1:9090)")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
-                    } else if let error = monitor.lastError {
-                        Text("Ошибка: \(error)")
-                            .font(.system(size: 12))
-                            .foregroundColor(.red)
-                    } else {
-                        Text("Ожидание запуска sing-box daemon...")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
-                    }
-                }
-            }
-            
-            Spacer()
-            
-            // Action Buttons
-            HStack(spacing: 10) {
-                Button(action: {
-                    if monitor.isMonitoring {
-                        monitor.stopMonitoring()
-                    } else {
-                        monitor.startMonitoring()
-                    }
-                }) {
-                    Label(monitor.isMonitoring ? "Пауза" : "Возобновить", systemImage: monitor.isMonitoring ? "pause.fill" : "play.fill")
-                        .font(.system(size: 12, weight: .medium))
-                }
-                .buttonStyle(.bordered)
-                
-                Button(role: .destructive, action: {
-                    showCloseAllAlert = true
-                }) {
-                    Label("Разорвать все", systemImage: "xmark.circle")
-                        .font(.system(size: 12, weight: .medium))
-                }
-                .buttonStyle(.bordered)
-                .disabled(monitor.connections.isEmpty)
-            }
-        }
-    }
-    
+
     // MARK: - Metrics Grid
     private var metricsGrid: some View {
-        LazyVGrid(columns: [
-            GridItem(.flexible(), spacing: 14),
-            GridItem(.flexible(), spacing: 14),
-            GridItem(.flexible(), spacing: 14)
-        ], spacing: 14) {
-            // Download Rate
-            GlassCard {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .font(.system(size: 18))
-                            .foregroundColor(.cyan)
-                        Text("Загрузка")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                    }
-                    
-                    Text(ByteFormatter.formatSpeed(monitor.downloadSpeed))
-                        .font(.system(size: 22, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
-                    
-                    Text("Всего: \(ByteFormatter.format(monitor.downloadTotal))")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            
-            // Upload Rate
-            GlassCard {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 18))
-                            .foregroundColor(.indigo)
-                        Text("Отдача")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                    }
-                    
-                    Text(ByteFormatter.formatSpeed(monitor.uploadSpeed))
-                        .font(.system(size: 22, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
-                    
-                    Text("Всего: \(ByteFormatter.format(monitor.uploadTotal))")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            
-            // Active Connections Count
-            GlassCard {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Image(systemName: "network")
-                            .font(.system(size: 18))
-                            .foregroundColor(.blue)
-                        Text("Соединения")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                    }
-                    
-                    Text("\(monitor.connections.count)")
-                        .font(.system(size: 22, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
-                    
-                    Text("Отфильтровано: \(filteredConnections.count)")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-    }
-    
-    // MARK: - Filter Bar
-    private var filterBar: some View {
-        HStack(spacing: 12) {
-            // Search
-            HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                TextField("Поиск по процессу, домену или IP...", text: $searchText)
-                    .textFieldStyle(.plain)
-                if !searchText.isEmpty {
-                    Button(action: { searchText = "" }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(8)
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.primary.opacity(0.1), lineWidth: 1)
-            )
-            
-            // Segmented Picker
-            Picker("", selection: $selectedFilter) {
-                ForEach(FilterRoute.allCases) { filter in
-                    Text(filter.rawValue).tag(filter)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 260)
+        Grid(horizontalSpacing: 14, verticalSpacing: 14) {
+            GridRow {
+                metricCard(
+                    title: "Загрузка",
+                    icon: "arrow.down.circle.fill",
+                    tint: VGTheme.accentPrimary,
+                    value: ByteFormatter.formatSpeed(monitor.downloadSpeed),
+                    subtitle: "Всего: \(ByteFormatter.format(monitor.downloadTotal))"
+                )
 
-            Toggle(isOn: $groupByProcessAndHost) {
-                Label("Группировать", systemImage: "square.stack.3d.up")
-                    .font(.system(size: 11, weight: .medium))
+                metricCard(
+                    title: "Отдача",
+                    icon: "arrow.up.circle.fill",
+                    tint: Color.indigo,
+                    value: ByteFormatter.formatSpeed(monitor.uploadSpeed),
+                    subtitle: "Всего: \(ByteFormatter.format(monitor.uploadTotal))"
+                )
+
+                metricCard(
+                    title: "Соединения",
+                    icon: "network",
+                    tint: VGTheme.statusProtected,
+                    value: "\(monitor.connections.count)",
+                    subtitle: "Отфильтровано: \(filteredConnections.count)"
+                )
             }
-            .toggleStyle(.button)
-            .help("Группировать повторяющиеся потоки по приложению и домену")
         }
     }
-    
+
+    private func metricCard(title: String, icon: String, tint: Color, value: String, subtitle: String) -> some View {
+        VGCard(padding: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: icon)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(tint)
+                    Text(title)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+
+                Text(value)
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     // MARK: - Connections Section
     private var connectionsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(groupByProcessAndHost
-                     ? "Группы соединений (\(groupedEntries.count) из \(filteredConnections.count) потоков)"
-                     : "Активные сессии (\(filteredConnections.count))")
-                    .font(.headline)
-                    .foregroundColor(.secondary)
+            VGSectionHeader(
+                groupByProcessAndHost
+                    ? "Группы соединений (\(groupedEntries.count) из \(filteredConnections.count))"
+                    : "Активные сессии (\(filteredConnections.count))"
+            ) {
                 if isHoveringList {
-                    Text("• Пауза обновления (наведение)")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.orange)
+                    VGStatusBadge("Пауза при наведении", tone: .warning, showDot: true)
+                } else {
+                    Text("Правый клик или переключатель VPN/Direct — правило в 1 клик")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
-                Spacer()
-                Text("Правый клик или кнопки VPN/Direct — правило в 1 клик")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
             }
 
             if filteredConnections.isEmpty {
-                emptyStateView
+                VGCard(padding: 20) {
+                    VGEmptyStateView(
+                        icon: "network.slash",
+                        title: searchText.isEmpty ? "Нет активных соединений" : "Ничего не найдено",
+                        message: searchText.isEmpty
+                            ? "Все сетевые сессии завершены или sing-box находится в режиме ожидания."
+                            : "Попробуйте изменить поисковый запрос или фильтр маршрутизации."
+                    )
+                }
             } else {
-                LazyVStack(spacing: 8) {
+                LazyVStack(spacing: 6) {
                     if groupByProcessAndHost {
                         ForEach(groupedEntries) { entry in
                             groupedConnectionRow(entry)
@@ -382,244 +340,225 @@ public struct TrafficMonitorView: View {
             }
         }
     }
-    
-    // MARK: - Connection Rows & 1-Click Rules
+
+    // MARK: - Grouped Row
     private func groupedConnectionRow(_ entry: GroupedTrafficEntry) -> some View {
         let hasDomain = VPNGuardViewModel.isValidDomainHost(entry.destinationHost)
         let hasPath = !(entry.processPath ?? "").isEmpty
 
-        return GlassCard(padding: 12) {
-            HStack(spacing: 12) {
-                HStack(spacing: 10) {
-                    Image(systemName: entry.isProxy ? "shield.fill" : "globe")
-                        .font(.system(size: 16))
-                        .foregroundColor(entry.isProxy ? .indigo : .green)
-                        .frame(width: 24)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text(entry.processName)
-                                .font(.system(size: 13, weight: .semibold))
-                                .lineLimit(1)
-                            if entry.connectionCount > 1 {
-                                Text("×\(entry.connectionCount)")
-                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1)
-                                    .background(Color.primary.opacity(0.08), in: Capsule())
-                            }
-                        }
-
-                        if let path = entry.processPath, !path.isEmpty {
-                            Text(VPNGuardViewModel.canonicalProcessTarget(from: path).path)
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                    }
-                }
-                .frame(width: 190, alignment: .leading)
-
-                Divider().frame(height: 28)
+        return HStack(spacing: 12) {
+            // Process Icon & Short Name (full path in tooltip)
+            HStack(spacing: 10) {
+                processIconView(path: entry.processPath, isProxy: entry.isProxy)
+                    .frame(width: 24, height: 24)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(entry.destinationHost)
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    if let ip = entry.destinationIp, ip != entry.destinationHost {
-                        Text(ip)
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(spacing: 5) {
+                        Text(entry.processName)
+                            .font(.system(size: 12, weight: .semibold))
+                            .lineLimit(1)
 
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(entry.isProxy ? Color.indigo : Color.green)
-                        .frame(width: 6, height: 6)
-                    Text(entry.outboundTag)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(entry.isProxy ? .indigo : .green)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background((entry.isProxy ? Color.indigo : Color.green).opacity(0.1))
-                .cornerRadius(6)
-                .frame(width: 115, alignment: .center)
-
-                VStack(alignment: .trailing, spacing: 2) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.down")
-                            .font(.system(size: 9))
-                            .foregroundColor(.cyan)
-                        Text(ByteFormatter.format(entry.totalDownload))
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    }
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 9))
-                            .foregroundColor(.indigo)
-                        Text(ByteFormatter.format(entry.totalUpload))
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    }
-                }
-                .frame(width: 85, alignment: .trailing)
-
-                oneClickRouteButtons(
-                    host: entry.destinationHost,
-                    processPath: entry.processPath,
-                    isProxy: entry.isProxy,
-                    hasDomain: hasDomain,
-                    hasPath: hasPath
-                )
-
-                Button {
-                    Task {
-                        for id in entry.connectionIds {
-                            _ = await monitor.closeConnection(id: id)
+                        if entry.connectionCount > 1 {
+                            Text("×\(entry.connectionCount)")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(VGTheme.surfaceLevel2, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
                         }
                     }
-                } label: {
-                    Image(systemName: "xmark.circle")
-                        .font(.system(size: 14))
-                        .foregroundColor(.secondary)
+
+                    if let subtitle = shortProcessSubtitle(entry.processPath) {
+                        Text(subtitle)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                 }
-                .buttonStyle(.plain)
-                .help("Разорвать все соединения этой группы")
             }
-        }
-        .contextMenu {
-            ruleContextMenuItems(host: entry.destinationHost, processPath: entry.processPath)
-            Divider()
-            Button("Разорвать соединения (\(entry.connectionCount))", role: .destructive) {
+            .frame(width: 175, alignment: .leading)
+            .help(entry.processPath ?? entry.processName)
+
+            Divider().frame(height: 24).opacity(0.45)
+
+            // Destination
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.destinationHost)
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                if let ip = entry.destinationIp, ip != entry.destinationHost {
+                    Text(ip)
+                        .font(.system(size: 10, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Data Transfer
+            VStack(alignment: .trailing, spacing: 2) {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 9))
+                        .foregroundStyle(VGTheme.accentPrimary)
+                    Text(ByteFormatter.format(entry.totalDownload))
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .monospacedDigit()
+                }
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                    Text(ByteFormatter.format(entry.totalUpload))
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .monospacedDigit()
+                }
+            }
+            .frame(width: 82, alignment: .trailing)
+
+            // Unified Route Switcher [VPN | Direct]
+            routeSwitcherControl(
+                host: entry.destinationHost,
+                processPath: entry.processPath,
+                isProxy: entry.isProxy,
+                hasDomain: hasDomain,
+                hasPath: hasPath
+            )
+
+            // Close group connections
+            Button {
                 Task {
                     for id in entry.connectionIds {
                         _ = await monitor.closeConnection(id: id)
                     }
                 }
+            } label: {
+                Image(systemName: "xmark.circle")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .help("Разорвать все соединения этой группы")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .vgHoverRow(cornerRadius: VGTheme.radiusControl)
+        .contextMenu {
+            ruleContextMenuItems(host: entry.destinationHost, processPath: entry.processPath)
         }
     }
 
+    // MARK: - Single Connection Row
     private func connectionRow(_ conn: ClashConnection) -> some View {
         let hasDomain = VPNGuardViewModel.isValidDomainHost(conn.destinationHost)
         let hasPath = !(conn.metadata.processPath ?? "").isEmpty
 
-        return GlassCard(padding: 12) {
-            HStack(spacing: 12) {
-                // Process Icon & Name
-                HStack(spacing: 10) {
-                    Image(systemName: conn.isProxy ? "shield.fill" : "globe")
-                        .font(.system(size: 16))
-                        .foregroundColor(conn.isProxy ? .indigo : .green)
-                        .frame(width: 24)
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(conn.processName)
-                            .font(.system(size: 13, weight: .semibold))
-                            .lineLimit(1)
-                        
-                        if let path = conn.metadata.processPath, !path.isEmpty {
-                            Text(path)
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                    }
-                }
-                .frame(width: 170, alignment: .leading)
-                
-                Divider()
-                    .frame(height: 28)
-                
-                // Destination Host / Port
+        return HStack(spacing: 12) {
+            HStack(spacing: 10) {
+                processIconView(path: conn.metadata.processPath, isProxy: conn.isProxy)
+                    .frame(width: 24, height: 24)
+
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(conn.destinationDisplay)
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    Text(conn.processName)
+                        .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
-                        .truncationMode(.middle)
-                    
-                    HStack(spacing: 4) {
-                        Text(conn.metadata.network?.uppercased() ?? "TCP")
-                            .font(.system(size: 9, weight: .bold))
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.secondary.opacity(0.15))
-                            .cornerRadius(3)
-                        
-                        if let ip = conn.metadata.destinationIP, ip != conn.metadata.host {
-                            Text(ip)
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                
-                // Route / Outbound Badge
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(conn.isProxy ? Color.indigo : Color.green)
-                        .frame(width: 6, height: 6)
-                    Text(conn.outboundTag)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(conn.isProxy ? .indigo : .green)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background((conn.isProxy ? Color.indigo : Color.green).opacity(0.1))
-                .cornerRadius(6)
-                .frame(width: 115, alignment: .center)
-                
-                // Data Transfer
-                VStack(alignment: .trailing, spacing: 2) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.down")
-                            .font(.system(size: 9))
-                            .foregroundColor(.cyan)
-                        Text(conn.formattedDownload)
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    }
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 9))
-                            .foregroundColor(.indigo)
-                        Text(conn.formattedUpload)
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    }
-                }
-                .frame(width: 85, alignment: .trailing)
 
-                oneClickRouteButtons(
-                    host: conn.destinationHost,
-                    processPath: conn.metadata.processPath,
-                    isProxy: conn.isProxy,
-                    hasDomain: hasDomain,
-                    hasPath: hasPath
-                )
-
-                // Duration
-                Text(conn.formattedDuration)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .frame(width: 48, alignment: .trailing)
-                
-                // Close Connection Button
-                Button(action: {
-                    connectionToClose = conn
-                }) {
-                    Image(systemName: "xmark.circle")
-                        .font(.system(size: 14))
-                        .foregroundColor(.secondary)
+                    if let subtitle = shortProcessSubtitle(conn.metadata.processPath) {
+                        Text(subtitle)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                 }
-                .buttonStyle(.plain)
-                .help("Разорвать это соединение")
             }
+            .frame(width: 175, alignment: .leading)
+            .help(conn.metadata.processPath ?? conn.processName)
+
+            Divider().frame(height: 24).opacity(0.45)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(conn.destinationDisplay)
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                HStack(spacing: 6) {
+                    Text((conn.metadata.network ?? "TCP").uppercased())
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(VGTheme.surfaceLevel2, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+
+                    if let ip = conn.metadata.destinationIP, ip != conn.metadata.host {
+                        Text(ip)
+                            .font(.system(size: 10, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(alignment: .trailing, spacing: 2) {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 9))
+                        .foregroundStyle(VGTheme.accentPrimary)
+                    Text(conn.formattedDownload)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .monospacedDigit()
+                }
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                    Text(conn.formattedUpload)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .monospacedDigit()
+                }
+            }
+            .frame(width: 82, alignment: .trailing)
+
+            routeSwitcherControl(
+                host: conn.destinationHost,
+                processPath: conn.metadata.processPath,
+                isProxy: conn.isProxy,
+                hasDomain: hasDomain,
+                hasPath: hasPath
+            )
+
+            Text(conn.formattedDuration)
+                .font(.system(size: 11, design: .monospaced))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 48, alignment: .trailing)
+
+            Button {
+                connectionToClose = conn
+            } label: {
+                Image(systemName: "xmark.circle")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Разорвать это соединение")
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .vgHoverRow(cornerRadius: VGTheme.radiusControl)
         .contextMenu {
             ruleContextMenuItems(host: conn.destinationHost, processPath: conn.metadata.processPath)
             Divider()
@@ -629,31 +568,19 @@ public struct TrafficMonitorView: View {
         }
     }
 
+    // MARK: - Unified [VPN | Direct] Route Switcher
     @ViewBuilder
-    private func oneClickRouteButtons(host: String, processPath: String?, isProxy: Bool, hasDomain: Bool, hasPath: Bool) -> some View {
+    private func routeSwitcherControl(
+        host: String,
+        processPath: String?,
+        isProxy: Bool,
+        hasDomain: Bool,
+        hasPath: Bool
+    ) -> some View {
         if hasDomain || hasPath {
-            HStack(spacing: 4) {
+            HStack(spacing: 2) {
                 Button {
-                    Task {
-                        if hasDomain {
-                            await vm.upsertDomainRule(domain: host, action: .direct, applyImmediately: true)
-                        } else if let p = processPath {
-                            await vm.upsertAppRule(processPath: p, action: .direct, applyImmediately: true)
-                        }
-                    }
-                } label: {
-                    Text("Direct")
-                        .font(.system(size: 10, weight: .semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(Color.green.opacity(isProxy ? 0.14 : 0.25), in: RoundedRectangle(cornerRadius: 5))
-                        .foregroundColor(.green)
-                }
-                .buttonStyle(.plain)
-                .disabled(vm.isApplyingRules)
-                .help(hasDomain ? "Направить домен \(host) напрямую (РФ / Direct)" : "Направить процесс напрямую")
-
-                Button {
+                    guard !isProxy else { return }
                     Task {
                         if hasDomain {
                             await vm.upsertDomainRule(domain: host, action: .proxy, applyImmediately: true)
@@ -663,16 +590,51 @@ public struct TrafficMonitorView: View {
                     }
                 } label: {
                     Text("VPN")
-                        .font(.system(size: 10, weight: .semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(Color.indigo.opacity(isProxy ? 0.25 : 0.14), in: RoundedRectangle(cornerRadius: 5))
-                        .foregroundColor(.indigo)
+                        .font(.system(size: 10, weight: isProxy ? .semibold : .medium))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(isProxy ? VGTheme.accentPrimary.opacity(0.22) : .clear)
+                        )
+                        .foregroundStyle(isProxy ? VGTheme.accentPrimary : .secondary)
                 }
                 .buttonStyle(.plain)
                 .disabled(vm.isApplyingRules)
-                .help(hasDomain ? "Направить домен \(host) через VPN" : "Направить процесс через VPN")
+                .help(isProxy ? "Маршрут: через VPN" : (hasDomain ? "Переключить \(host) на VPN" : "Переключить процесс на VPN"))
+
+                Button {
+                    guard isProxy else { return }
+                    Task {
+                        if hasDomain {
+                            await vm.upsertDomainRule(domain: host, action: .direct, applyImmediately: true)
+                        } else if let p = processPath {
+                            await vm.upsertAppRule(processPath: p, action: .direct, applyImmediately: true)
+                        }
+                    }
+                } label: {
+                    Text("Direct")
+                        .font(.system(size: 10, weight: !isProxy ? .semibold : .medium))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(!isProxy ? VGTheme.statusProtected.opacity(0.22) : .clear)
+                        )
+                        .foregroundStyle(!isProxy ? VGTheme.statusProtected : .secondary)
+                }
+                .buttonStyle(.plain)
+                .disabled(vm.isApplyingRules)
+                .help(!isProxy ? "Маршрут: напрямую (Direct)" : (hasDomain ? "Переключить \(host) на Direct" : "Переключить процесс на Direct"))
             }
+            .padding(2)
+            .background(VGTheme.surfaceLevel2, in: RoundedRectangle(cornerRadius: VGTheme.radiusBadge, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: VGTheme.radiusBadge, style: .continuous)
+                    .strokeBorder(VGTheme.borderSubtle, lineWidth: 0.5)
+            )
+        } else {
+            VGStatusBadge(isProxy ? "VPN" : "Direct", tone: isProxy ? .accent : .protected, showDot: true)
         }
     }
 
@@ -725,30 +687,39 @@ public struct TrafficMonitorView: View {
             Button("Копировать хост (\(host))") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(host, forType: .string)
-                vm.showToast("Хост скопирован в буфер", isError: false)
+                vm.showToast("Хост скопирован", isError: false)
             }
         }
     }
-    
-    // MARK: - Empty State
-    private var emptyStateView: some View {
-        GlassCard(padding: 40) {
-            VStack(spacing: 12) {
-                Image(systemName: "network.slash")
-                    .font(.system(size: 36))
-                    .foregroundColor(.secondary.opacity(0.6))
-                
-                Text(searchText.isEmpty ? "Нет активных соединений" : "Ничего не найдено")
-                    .font(.system(size: 15, weight: .semibold))
-                
-                Text(searchText.isEmpty ?
-                     "Все сетевые сессии завершены или sing-box находится в режиме ожидания." :
-                     "Попробуйте изменить поисковый запрос или фильтр маршрутизации.")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
+
+    @ViewBuilder
+    private func processIconView(path: String?, isProxy: Bool) -> some View {
+        if let path, let appRange = path.range(of: ".app") {
+            let appBundlePath = String(path[..<appRange.upperBound])
+            if FileManager.default.fileExists(atPath: appBundlePath) {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: appBundlePath))
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                fallbackProcessIcon(isProxy: isProxy)
             }
-            .frame(maxWidth: .infinity)
+        } else {
+            fallbackProcessIcon(isProxy: isProxy)
         }
+    }
+
+    private func fallbackProcessIcon(isProxy: Bool) -> some View {
+        Image(systemName: isProxy ? "shield.fill" : "globe")
+            .font(.system(size: 14))
+            .foregroundStyle(isProxy ? VGTheme.accentPrimary : VGTheme.statusProtected)
+    }
+
+    private func shortProcessSubtitle(_ path: String?) -> String? {
+        guard let path, !path.isEmpty else { return nil }
+        if let appRange = path.range(of: ".app") {
+            let appPath = String(path[..<appRange.upperBound])
+            return (appPath as NSString).lastPathComponent
+        }
+        return (path as NSString).deletingLastPathComponent
     }
 }

@@ -4,15 +4,15 @@ import AppKit
 public struct AppPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var vm: VPNGuardViewModel
-    
+
     @State private var installedApps: [DiscoveredApp] = []
     @State private var searchQuery: String = ""
     @State private var isLoading: Bool = true
-    
+
     public init(vm: VPNGuardViewModel) {
         self.vm = vm
     }
-    
+
     private var filteredApps: [DiscoveredApp] {
         if searchQuery.isEmpty {
             return installedApps
@@ -22,113 +22,117 @@ public struct AppPickerSheet: View {
             $0.path.localizedCaseInsensitiveContains(searchQuery)
         }
     }
-    
+
     public var body: some View {
-        VStack(spacing: 16) {
-            // Header
+        VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Добавить приложение")
-                        .font(.headline)
+                        .font(.system(size: 16, weight: .semibold))
                     Text("Выберите программу для маршрутизации через VPNGuard")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                 }
+
                 Spacer()
-                
-                Button("Выбрать любой .app...") {
+
+                Button("Выбрать .app…") {
                     openFilePicker()
                 }
                 .buttonStyle(.bordered)
-                
+            }
+            .padding(VGTheme.sheetPadding)
+
+            Divider().opacity(0.6)
+
+            VGSearchField("Поиск среди установленных приложений…", text: $searchQuery)
+                .padding(.horizontal, VGTheme.sheetPadding)
+                .padding(.vertical, 12)
+
+            Divider().opacity(0.5)
+
+            if isLoading {
+                VStack(spacing: 10) {
+                    Spacer()
+                    ProgressView()
+                    Text("Поиск установленных приложений…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if filteredApps.isEmpty {
+                VGEmptyStateView(
+                    icon: "app.dashed",
+                    title: "Приложения не найдены",
+                    message: "Попробуйте изменить поисковый запрос или выберите .app вручную."
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 6) {
+                        ForEach(filteredApps) { app in
+                            let isAlreadyAdded = vm.rules.apps.contains(where: { $0.bundlePath == app.path })
+
+                            HStack(spacing: 12) {
+                                Image(nsImage: NSWorkspace.shared.icon(forFile: app.path))
+                                    .resizable()
+                                    .frame(width: 28, height: 28)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(app.name)
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .lineLimit(1)
+                                    Text(app.path)
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+
+                                Spacer(minLength: 10)
+
+                                if isAlreadyAdded {
+                                    VGStatusBadge("Добавлено", tone: .neutral)
+                                } else {
+                                    Button("Добавить") {
+                                        vm.addApp(name: app.name, bundlePath: app.path, action: .proxy)
+                                        dismiss()
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+                                }
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .vgHoverRow(cornerRadius: VGTheme.radiusControl)
+                        }
+                    }
+                    .padding(.horizontal, VGTheme.sheetPadding)
+                    .padding(.vertical, 12)
+                }
+            }
+
+            Divider().opacity(0.6)
+
+            HStack {
+                Spacer()
                 Button("Закрыть") {
                     dismiss()
                 }
                 .keyboardShortcut(.cancelAction)
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 16)
-            
-            // Search field
-            HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                TextField("Поиск среди установленных приложений...", text: $searchQuery)
-                    .textFieldStyle(.plain)
-                if !searchQuery.isEmpty {
-                    Button {
-                        searchQuery = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(8)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-            .padding(.horizontal, 20)
-            
-            // Apps list
-            if isLoading {
-                Spacer()
-                ProgressView("Поиск установленных приложений...")
-                Spacer()
-            } else if filteredApps.isEmpty {
-                Spacer()
-                Text("Приложения не найдены")
-                    .foregroundColor(.secondary)
-                Spacer()
-            } else {
-                List(filteredApps) { app in
-                    HStack(spacing: 12) {
-                        Image(nsImage: NSWorkspace.shared.icon(forFile: app.path))
-                            .resizable()
-                            .frame(width: 32, height: 32)
-                        
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(app.name)
-                                .font(.system(size: 13, weight: .semibold))
-                            Text(app.path)
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                        
-                        Spacer()
-                        
-                        let isAlreadyAdded = vm.rules.apps.contains(where: { $0.bundlePath == app.path })
-                        
-                        if isAlreadyAdded {
-                            Text("Добавлено")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(.secondary)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 4)
-                                .background(Color.secondary.opacity(0.1), in: Capsule())
-                        } else {
-                            Button("Добавить") {
-                                vm.addApp(name: app.name, bundlePath: app.path, action: .proxy)
-                                dismiss()
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-                .listStyle(.inset(alternatesRowBackgrounds: true))
-            }
+            .padding(.horizontal, VGTheme.sheetPadding)
+            .padding(.vertical, 12)
         }
-        .frame(width: 580, height: 460)
+        .frame(width: 580, height: 480)
+        .background(VGTheme.backgroundContent)
         .task {
             isLoading = true
             installedApps = await AppDiscoveryService.shared.scanInstalledApps()
             isLoading = false
         }
     }
-    
+
     private func openFilePicker() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
@@ -136,7 +140,7 @@ public struct AppPickerSheet: View {
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.application]
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
-        
+
         if panel.runModal() == .OK, let selectedUrl = panel.url {
             let path = selectedUrl.path
             let name = (selectedUrl.lastPathComponent as NSString).deletingPathExtension

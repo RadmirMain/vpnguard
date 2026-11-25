@@ -160,4 +160,20 @@ final class VPNGuardAppTests: XCTestCase {
         XCTAssertFalse(upd.updateAvailable)
         XCTAssertEqual(upd.headCommit, "8fc61f4")
     }
+
+    func testVGFormattersAndByteFormatter() {
+        XCTAssertEqual(ByteFormatter.formatSpeed(0), "0 Б/с")
+        XCTAssertEqual(ByteFormatter.format(512), "512 Б")
+        XCTAssertEqual(ByteFormatter.formatSpeed(2048), "2.0 КБ/с")
+
+        XCTAssertEqual(VGFormatters.formatPID(40868), "40868")
+        XCTAssertEqual(VGFormatters.formatPID(nil), "—")
+
+        XCTAssertEqual(VGFormatters.formatProtocol("xhttp"), "XHTTP")
+        XCTAssertEqual(VGFormatters.formatProtocol("reality"), "Reality")
+        XCTAssertEqual(VGFormatters.formatProtocol("tls"), "TLS")
+
+        let ansi = "\u{001B}[32mINFO\u{001B}[0m connected"
+        XCTAssertEqual(VGFormatters.stripANSI(ansi), "INFO connected")
+    }
 }
