@@ -301,6 +301,31 @@ public struct MenuBarExtraView: View {
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundColor(.blue)
                         }
+
+                        if vm.isProtectionActive {
+                            HStack {
+                                Circle()
+                                    .fill(vm.tunnelHealthOk == true ? Color.green : (vm.tunnelHealthOk == false ? Color.red : Color.secondary))
+                                    .frame(width: 6, height: 6)
+                                Text("Связь через туннель:")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                if vm.tunnelHealthOk == true {
+                                    Text("ОК · \(vm.tunnelLatencyMs ?? 0) мс")
+                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                        .foregroundColor(.green)
+                                } else if vm.tunnelHealthOk == false {
+                                    Text("Нет ответа")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundColor(.red)
+                                } else {
+                                    Text("Проверка...")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
                     }
                 }
             }

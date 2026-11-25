@@ -338,6 +338,8 @@ Defaults:%admin env_reset
     /usr/local/bin/vpnguard rules apply --stdin, \
     /usr/local/bin/vpnguard server list, \
     /usr/local/bin/vpnguard server list --json, \
+    /usr/local/bin/vpnguard server ping --json, \
+    /usr/local/bin/vpnguard server sync-pf, \
     /usr/local/bin/vpnguard server import-vless --stdin, \
     /usr/local/bin/vpnguard server activate --stdin, \
     /usr/local/bin/vpnguard server delete --stdin, \

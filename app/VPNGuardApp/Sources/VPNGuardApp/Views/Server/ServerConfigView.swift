@@ -36,6 +36,38 @@ public struct ServerConfigView: View {
                     }
                     
                     Spacer()
+
+                    Button {
+                        Task {
+                            await vm.pingAllServers()
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            if vm.isPingingServers {
+                                ProgressView()
+                                    .scaleEffect(0.6)
+                            } else {
+                                Image(systemName: "speedometer")
+                            }
+                            Text("Пинг серверов")
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(vm.isPingingServers || vm.servers.isEmpty)
+
+                    if !vm.serverLatencies.isEmpty {
+                        Button {
+                            vm.sortServersByPing()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.up.arrow.down")
+                                Text("По скорости")
+                            }
+                            .font(.system(size: 12, weight: .medium))
+                        }
+                        .buttonStyle(.bordered)
+                    }
                     
                     Button {
                         Task {
@@ -57,6 +89,9 @@ public struct ServerConfigView: View {
                     .buttonStyle(.bordered)
                     .disabled(vm.isLoadingServers)
                 }
+
+                // MARK: - Failover & Tunnel Health Banner
+                autoFailoverSection
                 
                 // MARK: - Section 1: Quick VLESS / JSON Import
                 quickImportSection
@@ -105,6 +140,63 @@ public struct ServerConfigView: View {
         }
     }
     
+    // MARK: - Auto-Failover & Ping Helpers
+    private var autoFailoverSection: some View {
+        GlassCard(padding: 14) {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill((vm.tunnelHealthOk == false ? Color.red : Color.green).opacity(0.14))
+                        .frame(width: 34, height: 34)
+                    Image(systemName: vm.isRunningFailover ? "arrow.triangle.2.circlepath" : "waveform.path.ecg")
+                        .font(.system(size: 15))
+                        .foregroundColor(vm.tunnelHealthOk == false ? .red : .green)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        Text("Автопереключение при обрыве (Auto-Failover)")
+                            .font(.system(size: 13, weight: .bold))
+
+                        if let ok = vm.tunnelHealthOk {
+                            let label = ok ? "Туннель ОК · \(vm.tunnelLatencyMs ?? 0) мс" : "Туннель не отвечает"
+                            ServerBadgeCapsule(text: label, color: ok ? .green : .red)
+                        }
+                    }
+
+                    if let cooldown = vm.failoverCooldownUntil, cooldown.timeIntervalSinceNow > 0 {
+                        let secs = Int(ceil(cooldown.timeIntervalSinceNow))
+                        Text("Пауза цикла failover (\(secs)с). PF Kill-Switch остаётся активным.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.orange)
+                    } else {
+                        Text("При 3 сбоях подряд: ре-синк PF egress, затем выбор самого быстрого доступного сервера (GID 890 пинг)")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Spacer()
+
+                Toggle("", isOn: $vm.autoFailoverEnabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .disabled(vm.servers.count < 2)
+                    .help(vm.servers.count < 2 ? "Добавьте минимум 2 сервера для автопереключения" : "Включить автопереключение при обрыве")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func latencyBadge(for ping: ServerPingResult) -> some View {
+        if ping.reachable, let ms = ping.latencyMs {
+            let color: Color = ms < 120 ? .green : (ms < 250 ? .orange : .red)
+            ServerBadgeCapsule(text: "\(ms) мс", color: color)
+        } else {
+            ServerBadgeCapsule(text: "Недоступен", color: .red)
+        }
+    }
+
     // MARK: - Quick Import View
     private var quickImportSection: some View {
         GlassCard(padding: 18) {
@@ -359,6 +451,10 @@ public struct ServerConfigView: View {
                 }
                 
                 Spacer()
+
+                if let ping = vm.serverLatencies[server.id] {
+                    latencyBadge(for: ping)
+                }
                 
                 if server.isActive {
                     Text("АКТИВЕН")
@@ -538,6 +634,9 @@ public struct ServerConfigView: View {
                     }
                     if let sni = server.sni, !sni.isEmpty {
                         ServerBadgeCapsule(text: "SNI: \(sni)", color: .gray)
+                    }
+                    if let ping = vm.serverLatencies[server.id] {
+                        latencyBadge(for: ping)
                     }
                     
                     Spacer()

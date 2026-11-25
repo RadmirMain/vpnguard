@@ -177,6 +177,60 @@ private struct AppUpdateSheetView: View {
                     }
                     .buttonStyle(.bordered)
                     .disabled(vm.isUpdatingApp)
+
+                    Button {
+                        Task { await vm.checkForUpdates() }
+                    } label: {
+                        if vm.isCheckingUpdates {
+                            ProgressView().scaleEffect(0.6)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(vm.isCheckingUpdates || vm.isUpdatingApp)
+                    .help("Проверить наличие обновлений")
+                }
+            }
+
+            if let check = vm.updateCheckResult {
+                GlassCard(padding: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Image(systemName: check.updateAvailable ? "arrow.down.circle.fill" : "checkmark.seal.fill")
+                                .foregroundColor(check.updateAvailable ? .blue : .green)
+                            Text(check.updateAvailable ? "Доступны изменения для установки" : "Установлена актуальная версия")
+                                .font(.system(size: 12, weight: .semibold))
+                            Spacer()
+                            if !check.headCommit.isEmpty {
+                                Text("HEAD \(check.headCommit)")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        HStack(spacing: 12) {
+                            Label(
+                                check.frontendUpdateNeeded ? "Приложение: есть изменения" : "Приложение: актуально",
+                                systemImage: check.frontendUpdateNeeded ? "app.badge" : "checkmark.circle"
+                            )
+                            .font(.system(size: 11))
+                            .foregroundColor(check.frontendUpdateNeeded ? .orange : .green)
+
+                            Label(
+                                check.backendUpdateNeeded ? "Бэкенд: требуется Touch ID" : "Бэкенд: актуален",
+                                systemImage: check.backendUpdateNeeded ? "lock.shield" : "checkmark.circle"
+                            )
+                            .font(.system(size: 11))
+                            .foregroundColor(check.backendUpdateNeeded ? .orange : .green)
+
+                            if check.remoteAheadCount > 0 {
+                                Text("Git: +\(check.remoteAheadCount)")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(.blue)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -188,13 +242,13 @@ private struct AppUpdateSheetView: View {
                         .textSelection(.enabled)
                         .padding(8)
                 }
-                .frame(height: 140)
+                .frame(height: 120)
                 .background(Color.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
             }
 
             HStack {
                 Button {
-                    Task { await vm.triggerAppUpdate(forceBackend: true) }
+                    Task { await vm.triggerAppUpdate(forceApp: false, forceBackend: true) }
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "wrench.and.screwdriver")
@@ -207,30 +261,42 @@ private struct AppUpdateSheetView: View {
 
                 Spacer()
 
+                let isUpToDate = (vm.updateCheckResult?.updateAvailable == false)
+                if isUpToDate {
+                    Button("Пересобрать принудительно") {
+                        Task { await vm.triggerAppUpdate(forceApp: true, forceBackend: false) }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(vm.isUpdatingApp)
+                }
+
                 Button {
-                    Task { await vm.triggerAppUpdate(forceBackend: false) }
+                    Task { await vm.triggerAppUpdate(forceApp: false, forceBackend: false) }
                 } label: {
                     HStack(spacing: 6) {
                         if vm.isUpdatingApp {
                             ProgressView()
                                 .scaleEffect(0.6)
                         } else {
-                            Image(systemName: "arrow.triangle.2.circlepath")
+                            Image(systemName: isUpToDate ? "checkmark.circle" : "arrow.triangle.2.circlepath")
                         }
-                        Text(vm.isUpdatingApp ? "Обновление..." : "Обновить и перезапустить")
+                        Text(vm.isUpdatingApp ? "Обновление..." : (isUpToDate ? "Уже актуально" : "Установить обновление"))
                     }
                     .font(.system(size: 12, weight: .semibold))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
-                    .background(Color.blue.gradient, in: RoundedRectangle(cornerRadius: 8))
+                    .background((isUpToDate ? Color.green : Color.blue).gradient, in: RoundedRectangle(cornerRadius: 8))
                     .foregroundColor(.white)
                 }
                 .buttonStyle(.plain)
-                .disabled(vm.isUpdatingApp)
+                .disabled(vm.isUpdatingApp || vm.isCheckingUpdates || isUpToDate)
             }
         }
         .padding(20)
-        .frame(width: 560)
+        .frame(width: 580)
+        .task {
+            await vm.checkForUpdates()
+        }
     }
 
     private func chooseRepoFolder() {
@@ -241,6 +307,7 @@ private struct AppUpdateSheetView: View {
         panel.directoryURL = URL(fileURLWithPath: vm.sourceRepoPath)
         if panel.runModal() == .OK, let url = panel.url {
             vm.setSourceRepoPath(url.path)
+            Task { await vm.checkForUpdates() }
         }
     }
 }

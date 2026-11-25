@@ -44,20 +44,45 @@ public final class VPNGuardViewModel: ObservableObject {
 
     // Self-Update State (stored in UserDefaults so ad-hoc signature stays intact)
     private static let sourceRepoPathKey = "sourceRepoPath"
+    private static let autoFailoverKey = "autoFailoverEnabled"
     @Published public var sourceRepoPath: String
     @Published public var isUpdatingApp: Bool = false
+    @Published public var isCheckingUpdates: Bool = false
+    @Published public var updateCheckResult: UpdateCheckResult? = nil
     @Published public var updateLogOutput: String? = nil
+
+    // Server Ping & Tunnel Health / Auto-Failover State
+    @Published public var serverLatencies: [String: ServerPingResult] = [:]
+    @Published public var isPingingServers: Bool = false
+    @Published public var tunnelHealthOk: Bool? = nil
+    @Published public var tunnelLatencyMs: Int? = nil
+    @Published public var lastHealthCheckAt: Date? = nil
+    @Published public var autoFailoverEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(autoFailoverEnabled, forKey: Self.autoFailoverKey)
+            if !autoFailoverEnabled {
+                failoverAttemptedServerIds.removeAll()
+                failoverCooldownUntil = nil
+            }
+        }
+    }
+    @Published public var failoverCooldownUntil: Date? = nil
+    @Published public var isRunningFailover: Bool = false
 
     // Services & Timers
     private let service = VPNGuardService.shared
     private var nativeProbeCancellable: AnyCancellable?
     private var periodicSyncCancellable: AnyCancellable?
+    private var healthProbeCancellable: AnyCancellable?
     private var pauseCountdownCancellable: AnyCancellable?
     private var wakeObserver: NSObjectProtocol?
     private var pathMonitor: NWPathMonitor?
     private var lastPathSignature: String? = nil
     private var networkChangeTask: Task<Void, Never>?
     private var isResumingFromPause: Bool = false
+    private var isNetworkSatisfied: Bool = true
+    private var isCheckingHealth: Bool = false
+    private var failoverAttemptedServerIds: Set<String> = []
 
     public init() {
         let defaultRepo = FileManager.default.homeDirectoryForCurrentUser
@@ -68,6 +93,7 @@ public final class VPNGuardViewModel: ObservableObject {
         } else {
             self.sourceRepoPath = defaultRepo
         }
+        self.autoFailoverEnabled = UserDefaults.standard.bool(forKey: Self.autoFailoverKey)
 
         checkLaunchAtLoginStatus()
 
@@ -83,6 +109,7 @@ public final class VPNGuardViewModel: ObservableObject {
             await refreshStatus(fast: false)
             await loadRules()
             await loadServers()
+            await runTunnelHealthCheck(allowFailover: false)
         }
         startTimers()
         startNetworkMonitor()
@@ -92,6 +119,7 @@ public final class VPNGuardViewModel: ObservableObject {
     deinit {
         nativeProbeCancellable?.cancel()
         periodicSyncCancellable?.cancel()
+        healthProbeCancellable?.cancel()
         pauseCountdownCancellable?.cancel()
         networkChangeTask?.cancel()
         pathMonitor?.cancel()
@@ -104,6 +132,7 @@ public final class VPNGuardViewModel: ObservableObject {
     public func startTimers() {
         nativeProbeCancellable?.cancel()
         periodicSyncCancellable?.cancel()
+        healthProbeCancellable?.cancel()
 
         // Fast native interface probe every 2.5s (no sudo, no network I/O)
         nativeProbeCancellable = Timer.publish(every: 2.5, on: .main, in: .common)
@@ -113,6 +142,8 @@ public final class VPNGuardViewModel: ObservableObject {
                 let utunUp = self.service.isUtunInterfaceUp(name: "utun99")
                 if !utunUp && self.isProtectionActive && !self.isTogglingPower && !self.isTogglingPause {
                     self.isProtectionActive = false
+                    self.tunnelHealthOk = nil
+                    self.tunnelLatencyMs = nil
                     Task { await self.refreshStatus(fast: true) }
                 } else if utunUp && !self.isProtectionActive && !self.isTogglingPower && !self.isTogglingPause {
                     Task { await self.refreshStatus(fast: true) }
@@ -127,9 +158,18 @@ public final class VPNGuardViewModel: ObservableObject {
                     await self?.refreshStatus(fast: true)
                 }
             }
+
+        // Real tunnel liveness probe every 25s via 127.0.0.1:18089
+        healthProbeCancellable = Timer.publish(every: 25.0, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                Task { [weak self] in
+                    await self?.runTunnelHealthCheck(allowFailover: true)
+                }
+            }
     }
 
-    // MARK: - NWPathMonitor for Automatic Network-Switch DNS Sync
+    // MARK: - NWPathMonitor for Automatic Network-Switch DNS & PF Sync
     private func startNetworkMonitor() {
         let monitor = NWPathMonitor()
         self.pathMonitor = monitor
@@ -141,9 +181,11 @@ public final class VPNGuardViewModel: ObservableObject {
                 .joined(separator: ",")
             let gateways = path.gateways.map(\.debugDescription).sorted().joined(separator: ",")
             let signature = "\(path.status)|\(interfaces)|\(gateways)"
+            let satisfied = (path.status == .satisfied)
 
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                self.isNetworkSatisfied = satisfied
                 if self.lastPathSignature == nil {
                     self.lastPathSignature = signature
                     return
@@ -151,14 +193,16 @@ public final class VPNGuardViewModel: ObservableObject {
                 guard signature != self.lastPathSignature else { return }
                 self.lastPathSignature = signature
 
-                guard path.status == .satisfied else { return }
+                guard satisfied else { return }
                 self.networkChangeTask?.cancel()
                 self.networkChangeTask = Task { @MainActor [weak self] in
                     try? await Task.sleep(nanoseconds: 1_200_000_000)
                     guard let self, !Task.isCancelled else { return }
                     if self.isProtectionActive || self.service.isUtunInterfaceUp(name: "utun99") {
                         try? await self.service.syncDns()
+                        try? await self.service.syncPfEgress()
                         await self.refreshStatus(fast: false)
+                        await self.runTunnelHealthCheck(allowFailover: false)
                     }
                 }
             }
@@ -366,19 +410,49 @@ public final class VPNGuardViewModel: ObservableObject {
         guard !trimmed.isEmpty else { return }
         sourceRepoPath = trimmed
         UserDefaults.standard.set(trimmed, forKey: Self.sourceRepoPathKey)
+        updateCheckResult = nil
     }
 
-    public func triggerAppUpdate(forceBackend: Bool = false) async {
-        guard !isUpdatingApp else { return }
-        isUpdatingApp = true
-        updateLogOutput = "Запуск обновления из \(sourceRepoPath)..."
+    public func checkForUpdates() async {
+        guard !isCheckingUpdates && !isUpdatingApp else { return }
+        isCheckingUpdates = true
+        defer { isCheckingUpdates = false }
 
         do {
-            let output = try await service.runUpdateScript(repoPath: sourceRepoPath, forceBackend: forceBackend)
+            let check = try await service.checkForUpdates(repoPath: sourceRepoPath)
+            updateCheckResult = check
+        } catch {
+            updateCheckResult = nil
+            updateLogOutput = error.localizedDescription
+        }
+    }
+
+    public func triggerAppUpdate(forceApp: Bool = false, forceBackend: Bool = false) async {
+        guard !isUpdatingApp else { return }
+        isUpdatingApp = true
+        updateLogOutput = "Проверка и обновление из \(sourceRepoPath)..."
+
+        do {
+            let output = try await service.runUpdateScript(
+                repoPath: sourceRepoPath,
+                forceApp: forceApp,
+                forceBackend: forceBackend
+            )
             updateLogOutput = output
-            showToast("Обновление собрано. Перезапуск VPNGuard...", isError: false)
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            NSApp.terminate(nil)
+            if output.contains("VPNGUARD_RELAUNCH_SCHEDULED") {
+                showToast("Обновление собрано. Перезапуск VPNGuard...", isError: false)
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                NSApp.terminate(nil)
+            } else if output.contains("VPNGUARD_UP_TO_DATE") {
+                isUpdatingApp = false
+                await checkForUpdates()
+                showToast("Актуальная версия уже установлена", isError: false)
+            } else {
+                isUpdatingApp = false
+                await checkForUpdates()
+                await refreshStatus(fast: true)
+                showToast("Обновление завершено", isError: false)
+            }
         } catch {
             updateLogOutput = error.localizedDescription
             showToast("Ошибка обновления: \(error.localizedDescription)", isError: true)
@@ -635,6 +709,152 @@ public final class VPNGuardViewModel: ObservableObject {
         } catch {
             showToast("Ошибка удаления: \(error.localizedDescription)", isError: true)
             return false
+        }
+    }
+
+    // MARK: - Server Ping (GID 890 + IP_BOUND_IF) & Auto-Failover
+    public func pingAllServers(silent: Bool = false) async {
+        guard !isPingingServers else { return }
+        isPingingServers = true
+        defer { isPingingServers = false }
+
+        do {
+            let results = try await service.pingServers()
+            var map: [String: ServerPingResult] = [:]
+            for item in results {
+                map[item.id] = item
+            }
+            self.serverLatencies = map
+            if !silent {
+                let reachableCount = results.filter(\.reachable).count
+                showToast("Пинг завершён: доступно \(reachableCount) из \(results.count)", isError: false)
+            }
+        } catch {
+            if !silent {
+                showToast("Ошибка пинга серверов: \(error.localizedDescription)", isError: true)
+            }
+        }
+    }
+
+    public func sortServersByPing() {
+        servers.sort { a, b in
+            if a.isActive != b.isActive {
+                return a.isActive
+            }
+            let latA = serverLatencies[a.id]?.latencyMs ?? Int.max
+            let latB = serverLatencies[b.id]?.latencyMs ?? Int.max
+            if latA != latB {
+                return latA < latB
+            }
+            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
+    }
+
+    public func runTunnelHealthCheck(allowFailover: Bool) async {
+        guard isProtectionActive, !isTogglingPower, !isTogglingPause, !isUpdatingApp else {
+            if !isProtectionActive {
+                tunnelHealthOk = nil
+                tunnelLatencyMs = nil
+            }
+            return
+        }
+        guard !isCheckingHealth else { return }
+        isCheckingHealth = true
+        defer { isCheckingHealth = false }
+
+        let probe = await service.measureTunnelHealth()
+        lastHealthCheckAt = Date()
+        if probe.ok {
+            tunnelHealthOk = true
+            tunnelLatencyMs = probe.latencyMs
+            failoverAttemptedServerIds.removeAll()
+            return
+        }
+
+        tunnelHealthOk = false
+        tunnelLatencyMs = nil
+
+        guard allowFailover,
+              autoFailoverEnabled,
+              isNetworkSatisfied,
+              !isRunningFailover,
+              servers.count > 1 else {
+            return
+        }
+
+        if let cooldown = failoverCooldownUntil {
+            if cooldown.timeIntervalSinceNow > 0 {
+                return
+            }
+            failoverCooldownUntil = nil
+            failoverAttemptedServerIds.removeAll()
+        }
+
+        await performAutoFailoverSequence()
+    }
+
+    private func performAutoFailoverSequence() async {
+        isRunningFailover = true
+        defer { isRunningFailover = false }
+
+        // Require 2 more failed probes (3 consecutive failures total, 3s apart)
+        for _ in 0..<2 {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard isProtectionActive, isNetworkSatisfied, !isTogglingPower, !isTogglingPause else { return }
+            let retry = await service.measureTunnelHealth()
+            if retry.ok {
+                tunnelHealthOk = true
+                tunnelLatencyMs = retry.latencyMs
+                return
+            }
+        }
+
+        // Step 1: Re-resolve active server IP & refresh PF vpnguard/egress before switching
+        try? await service.syncPfEgress()
+        let afterResync = await service.measureTunnelHealth()
+        if afterResync.ok {
+            tunnelHealthOk = true
+            tunnelLatencyMs = afterResync.latencyMs
+            showToast("IP релея обновлён в PF, связь восстановлена", isError: false)
+            return
+        }
+
+        // Step 2: Ping all servers directly via GID 890 + IP_BOUND_IF and pick best untested server
+        if let activeId = activeServer?.id ?? status.activeServerId {
+            failoverAttemptedServerIds.insert(activeId)
+        }
+
+        await pingAllServers(silent: true)
+        let candidates = servers
+            .filter { !failoverAttemptedServerIds.contains($0.id) }
+            .compactMap { srv -> (server: ServerProfile, latency: Int)? in
+                guard let ping = serverLatencies[srv.id], ping.reachable, let lat = ping.latencyMs else {
+                    return nil
+                }
+                return (srv, lat)
+            }
+            .sorted { $0.latency < $1.latency }
+
+        guard let best = candidates.first else {
+            // Completed 1 full circle: enter 5-minute failover cooldown while keeping PF Kill-Switch ARMED
+            failoverCooldownUntil = Date().addingTimeInterval(300)
+            failoverAttemptedServerIds.removeAll()
+            let msg = "Доступных резервных серверов не найдено. Kill-Switch остаётся активным; автопереключение на паузе 5 мин."
+            showToast(msg, isError: true)
+            service.sendUserNotification(title: "VPNGuard Auto-Failover", message: msg)
+            return
+        }
+
+        showToast("Переключение на резервный сервер «\(best.server.name)» (\(best.latency) мс)...", isError: false)
+        let switched = await activateServer(id: best.server.id)
+        if switched {
+            let verify = await service.measureTunnelHealth()
+            tunnelHealthOk = verify.ok
+            tunnelLatencyMs = verify.latencyMs
+            service.sendUserNotification(
+                title: "VPNGuard Auto-Failover",
+                message: "Переключено на «\(best.server.name)» (\(best.latency) мс)"
+            )
         }
     }
 

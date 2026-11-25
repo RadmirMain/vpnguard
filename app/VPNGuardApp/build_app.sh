@@ -32,6 +32,13 @@ fi
 
 echo -n "APPL????" > "${OUTPUT_APP}/Contents/PkgInfo"
 
+(
+    cd "${SCRIPT_DIR}"
+    find Package.swift build_app.sh Resources Sources -type f \
+        ! -name '.DS_Store' \
+        -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}' > "${OUTPUT_APP}/Contents/Resources/frontend.sha256"
+)
+
 echo "==> Stripping extended attributes & ad-hoc signing ${APP_BUNDLE_NAME}..."
 xattr -cr "${OUTPUT_APP}" 2>/dev/null || true
 codesign --force --deep --sign - "${OUTPUT_APP}"

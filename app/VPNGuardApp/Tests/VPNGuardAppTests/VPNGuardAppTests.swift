@@ -128,4 +128,36 @@ final class VPNGuardAppTests: XCTestCase {
         XCTAssertEqual(snap.logs.singbox, "ok")
         XCTAssertEqual(snap.system.utun, "utun99")
     }
+
+    func testServerPingAndUpdateCheckDecoding() throws {
+        let pingJson = """
+        [
+          {"id": "s1", "name": "Fast", "host": "203.0.113.10", "ip": "203.0.113.10", "port": 443, "latencyMs": 32, "reachable": true, "error": null},
+          {"id": "s2", "name": "Down", "host": "203.0.113.20", "ip": "203.0.113.20", "port": 443, "latencyMs": null, "reachable": false, "error": "timed out"}
+        ]
+        """
+        let pings = try JSONDecoder().decode([ServerPingResult].self, from: Data(pingJson.utf8))
+        XCTAssertEqual(pings.count, 2)
+        XCTAssertTrue(pings[0].reachable)
+        XCTAssertEqual(pings[0].latencyMs, 32)
+        XCTAssertFalse(pings[1].reachable)
+
+        let updJson = """
+        {
+          "updateAvailable": false,
+          "backendUpdateNeeded": false,
+          "frontendUpdateNeeded": false,
+          "remoteAheadCount": 0,
+          "localDirty": false,
+          "headCommit": "8fc61f4",
+          "installedBackendHash": "abcdef123456",
+          "currentBackendHash": "abcdef123456",
+          "installedFrontendHash": "123456abcdef",
+          "currentFrontendHash": "123456abcdef"
+        }
+        """
+        let upd = try JSONDecoder().decode(UpdateCheckResult.self, from: Data(updJson.utf8))
+        XCTAssertFalse(upd.updateAvailable)
+        XCTAssertEqual(upd.headCommit, "8fc61f4")
+    }
 }

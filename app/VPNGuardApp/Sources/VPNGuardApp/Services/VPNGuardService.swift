@@ -179,7 +179,24 @@ public final class VPNGuardService {
     }
 
     // MARK: - Native App & Backend Updater
-    public func runUpdateScript(repoPath: String, forceBackend: Bool) async throws -> String {
+    public func checkForUpdates(repoPath: String) async throws -> UpdateCheckResult {
+        let scriptPath = (repoPath as NSString).appendingPathComponent("update.sh")
+        guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
+            throw VPNGuardError.commandFailed("Скрипт обновления не найден по пути: \(scriptPath)")
+        }
+
+        let output = try await runUserScript(executable: "/bin/bash", arguments: [scriptPath, "--check"])
+        guard let data = output.data(using: .utf8) else {
+            throw VPNGuardError.decodingError("Пустой ответ от update.sh --check")
+        }
+        do {
+            return try jsonDecoder.decode(UpdateCheckResult.self, from: data)
+        } catch {
+            throw VPNGuardError.decodingError("Ошибка разбора статуса обновления: \(error.localizedDescription)")
+        }
+    }
+
+    public func runUpdateScript(repoPath: String, forceApp: Bool = false, forceBackend: Bool = false) async throws -> String {
         let scriptPath = (repoPath as NSString).appendingPathComponent("update.sh")
         guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
             throw VPNGuardError.commandFailed("Скрипт обновления не найден по пути: \(scriptPath)")
@@ -187,15 +204,21 @@ public final class VPNGuardService {
 
         let currentPid = ProcessInfo.processInfo.processIdentifier
         var args = [scriptPath, "--from-app-pid", "\(currentPid)"]
+        if forceApp {
+            args.append("--force-app")
+        }
         if forceBackend {
             args.append("--force-backend")
         }
+        return try await runUserScript(executable: "/bin/bash", arguments: args)
+    }
 
+    private func runUserScript(executable: String, arguments: [String]) async throws -> String {
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/bin/bash")
-                process.arguments = args
+                process.executableURL = URL(fileURLWithPath: executable)
+                process.arguments = arguments
                 var env = ProcessInfo.processInfo.environment
                 env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
                 process.environment = env
@@ -243,9 +266,9 @@ public final class VPNGuardService {
                 let combined = [outStr, errStr].filter { !$0.isEmpty }.joined(separator: "\n")
 
                 if process.terminationStatus == 0 {
-                    continuation.resume(returning: combined)
+                    continuation.resume(returning: outStr.isEmpty ? combined : outStr)
                 } else {
-                    continuation.resume(throwing: VPNGuardError.commandFailed(combined.isEmpty ? "Ошибка обновления (код \(process.terminationStatus))" : combined))
+                    continuation.resume(throwing: VPNGuardError.commandFailed(combined.isEmpty ? "Ошибка выполнения скрипта (код \(process.terminationStatus))" : combined))
                 }
             }
         }
@@ -349,6 +372,83 @@ public final class VPNGuardService {
         guard result.isSuccess else {
             let errorDetails = result.stderr.isEmpty ? result.stdout : result.stderr
             throw VPNGuardError.commandFailed(errorDetails.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    public func pingServers() async throws -> [ServerPingResult] {
+        let result = await executor.execute(arguments: ["server", "ping", "--json"], timeout: 20.0)
+        guard result.isSuccess, let data = result.stdout.data(using: .utf8), !data.isEmpty else {
+            let errorDetails = result.stderr.isEmpty ? result.stdout : result.stderr
+            throw VPNGuardError.commandFailed(errorDetails.isEmpty ? "Не удалось выполнить пинг серверов" : errorDetails)
+        }
+        do {
+            return try jsonDecoder.decode([ServerPingResult].self, from: data)
+        } catch {
+            throw VPNGuardError.decodingError("Ошибка разбора результатов пинга: \(error.localizedDescription)")
+        }
+    }
+
+    public func syncPfEgress() async throws {
+        let result = await executor.execute(arguments: ["server", "sync-pf"], timeout: 15.0)
+        if !result.isSuccess {
+            let details = result.stderr.isEmpty ? result.stdout : result.stderr
+            throw VPNGuardError.commandFailed(details.isEmpty ? "Не удалось обновить vpnguard/egress" : details)
+        }
+    }
+
+    // MARK: - Real Upstream Tunnel Health Probe (via 127.0.0.1:18089)
+    public func measureTunnelHealth() async -> (ok: Bool, latencyMs: Int?, error: String?) {
+        guard let url = URL(string: "https://cp.cloudflare.com/generate_204") else {
+            return (false, nil, "Invalid probe URL")
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 4.0
+        config.timeoutIntervalForResource = 5.0
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.connectionProxyDictionary = [
+            kCFNetworkProxiesHTTPEnable as String: true,
+            kCFNetworkProxiesHTTPProxy as String: "127.0.0.1",
+            kCFNetworkProxiesHTTPPort as String: 18089,
+            kCFNetworkProxiesHTTPSEnable as String: true,
+            kCFNetworkProxiesHTTPSProxy as String: "127.0.0.1",
+            kCFNetworkProxiesHTTPSPort as String: 18089
+        ]
+
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 4.0
+
+        let started = Date()
+        do {
+            let (_, response) = try await session.data(for: req)
+            let ms = max(1, Int(round(Date().timeIntervalSince(started) * 1000.0)))
+            if let http = response as? HTTPURLResponse, (200...399).contains(http.statusCode) {
+                return (true, ms, nil)
+            }
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            return (false, nil, "HTTP \(code)")
+        } catch {
+            return (false, nil, error.localizedDescription)
+        }
+    }
+
+    public func sendUserNotification(title: String, message: String) {
+        DispatchQueue.global(qos: .utility).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = [
+                "-e",
+                "on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run",
+                title,
+                message
+            ]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try? process.run()
         }
     }
 

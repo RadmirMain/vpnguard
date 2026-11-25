@@ -31,7 +31,9 @@ import uuid
 import copy
 import ipaddress
 import grp
+import struct
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Optional, Tuple, List
 
 VERSION = "3.0.0"
@@ -2712,6 +2714,220 @@ def cmd_server_sync_pf(args: argparse.Namespace) -> int:
     return 1
 
 
+IP_BOUND_IF_DARWIN = 25
+
+
+def _get_physical_default_interface() -> Optional[str]:
+    """Detect active physical IPv4 default interface (excluding utun/lo/awdl) via netstat."""
+    excluded_prefixes = ("utun", "lo", "awdl", "llw", "ipsec", "bridge", "gif", "stf")
+    try:
+        res = subprocess.run(["netstat", "-rn", "-f", "inet"], capture_output=True, text=True, timeout=3)
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 4 and parts[0] == "default":
+                    iface = parts[3].strip()
+                    if iface and not iface.startswith(excluded_prefixes):
+                        return iface
+    except Exception:
+        pass
+    try:
+        if os.path.exists("/usr/sbin/networksetup"):
+            res = subprocess.run(["networksetup", "-listnetworkserviceorder"], capture_output=True, text=True, timeout=3)
+            for m in re.finditer(r"Device:\s*(en\d+)\)", res.stdout):
+                return m.group(1)
+    except Exception:
+        pass
+    return "en0"
+
+
+def _resolve_server_probe_ip(server: Dict[str, Any]) -> Optional[str]:
+    """Prefer cached resolvedIps (works even when tunnel DNS is down), else resolve host."""
+    for candidate in (server.get("resolvedIps") or []):
+        cand_str = str(candidate).strip()
+        if cand_str:
+            try:
+                ip_obj = ipaddress.ip_address(cand_str)
+                if ip_obj.version == 4:
+                    return cand_str
+            except ValueError:
+                pass
+    host = str(server.get("host", "")).strip()
+    if not host:
+        return None
+    try:
+        ip_obj = ipaddress.ip_address(host)
+        if ip_obj.version == 4:
+            return host
+    except ValueError:
+        pass
+    ips = resolve_host_ipv4(host)
+    for ip_cand in ips:
+        try:
+            if ipaddress.ip_address(ip_cand).version == 4:
+                return ip_cand
+        except ValueError:
+            continue
+    return None
+
+
+def _probe_tcp_rtt_single(
+    target_ip: str,
+    port: int,
+    if_index: Optional[int],
+    timeout: float = 2.0
+) -> Tuple[Optional[int], Optional[str]]:
+    """Measure direct TCP handshake RTT (ms) optionally bound to physical interface via IP_BOUND_IF."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        if if_index is not None and if_index > 0:
+            try:
+                sock.setsockopt(socket.IPPROTO_IP, IP_BOUND_IF_DARWIN, struct.pack("I", if_index))
+            except OSError:
+                pass
+        t0 = time.monotonic()
+        sock.connect((target_ip, int(port)))
+        elapsed_ms = max(1, int(round((time.monotonic() - t0) * 1000.0)))
+        return elapsed_ms, None
+    except Exception as e:
+        return None, str(e)
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def ping_servers_via_gid890(servers: List[Dict[str, Any]], timeout: float = 2.0) -> List[Dict[str, Any]]:
+    """
+    Probe all servers concurrently via direct physical interface (IP_BOUND_IF) inside a GID 890
+    child process so PF allows direct IPv4 bypass without weakening Kill-Switch rules.
+    """
+    iface = _get_physical_default_interface()
+    if_index: Optional[int] = None
+    if iface:
+        try:
+            if_index = socket.if_nametoindex(iface)
+        except Exception:
+            if_index = None
+
+    prepared: List[Dict[str, Any]] = []
+    for s in servers:
+        prepared.append({
+            "id": s.get("id", ""),
+            "name": s.get("name", "Unnamed"),
+            "host": s.get("host", ""),
+            "port": int(s.get("port", 443)),
+            "ip": _resolve_server_probe_ip(s),
+        })
+
+    def _run_probes() -> List[Dict[str, Any]]:
+        def _probe_one(item: Dict[str, Any]) -> Dict[str, Any]:
+            ip_addr = item["ip"]
+            if not ip_addr:
+                return {
+                    "id": item["id"],
+                    "name": item["name"],
+                    "host": item["host"],
+                    "ip": None,
+                    "port": item["port"],
+                    "latencyMs": None,
+                    "reachable": False,
+                    "error": "Failed to resolve server IPv4",
+                }
+            rtt, err = _probe_tcp_rtt_single(ip_addr, item["port"], if_index, timeout=timeout)
+            return {
+                "id": item["id"],
+                "name": item["name"],
+                "host": item["host"],
+                "ip": ip_addr,
+                "port": item["port"],
+                "latencyMs": rtt,
+                "reachable": (rtt is not None),
+                "error": err,
+            }
+
+        if not prepared:
+            return []
+        with ThreadPoolExecutor(max_workers=min(8, len(prepared))) as pool:
+            return list(pool.map(_probe_one, prepared))
+
+    if os.geteuid() != 0:
+        return _run_probes()
+
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        try:
+            try:
+                os.setgroups([890])
+                os.setgid(890)
+            except Exception:
+                pass
+            payload = json.dumps(_run_probes(), ensure_ascii=False).encode("utf-8")
+            os.write(write_fd, payload)
+        except Exception as e:
+            try:
+                os.write(write_fd, json.dumps({"error": str(e)}).encode("utf-8"))
+            except Exception:
+                pass
+        finally:
+            try:
+                os.close(write_fd)
+            except Exception:
+                pass
+            os._exit(0)
+
+    os.close(write_fd)
+    chunks: List[bytes] = []
+    try:
+        while True:
+            chunk = os.read(read_fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(read_fd)
+        try:
+            os.waitpid(pid, 0)
+        except Exception:
+            pass
+
+    raw = b"".join(chunks).decode("utf-8", errors="replace").strip()
+    if not raw:
+        return []
+    parsed = json.loads(raw)
+    if isinstance(parsed, dict) and "error" in parsed:
+        raise RuntimeError(parsed["error"])
+    return parsed
+
+
+def cmd_server_ping(args: argparse.Namespace) -> int:
+    """Measure direct TCP RTT (ms) to all configured servers via GID 890 + IP_BOUND_IF."""
+    is_json = getattr(args, "json", False)
+    try:
+        store = load_servers_store()
+        servers = store.get("servers", [])
+        results = ping_servers_via_gid890(servers, timeout=2.0)
+    except Exception as e:
+        if is_json:
+            print(json.dumps({"status": "error", "message": str(e)}))
+        else:
+            print(f"{C_RED}[!] Server ping failed: {e}{C_RESET}", file=sys.stderr)
+        return 1
+
+    if is_json:
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        return 0
+
+    for item in results:
+        lat = f"{item['latencyMs']} ms" if item["reachable"] else f"FAIL ({item.get('error')})"
+        print(f"  • {item['name']} ({item['host']}:{item['port']}): {lat}")
+    return 0
+
+
 def cmd_server_update(args: argparse.Namespace) -> int:
     """Validate and atomically apply new upstream Xray JSON, syncing servers.json and PF."""
     use_stdin = getattr(args, "stdin", False)
@@ -3396,6 +3612,10 @@ def main() -> int:
 
     p_server_sync_pf = server_sub.add_parser("sync-pf", help="Regenerate and load PF sub-anchor vpnguard/egress")
     p_server_sync_pf.set_defaults(func=cmd_server_sync_pf)
+
+    p_server_ping = server_sub.add_parser("ping", help="Measure direct TCP latency (ms) to all configured servers")
+    p_server_ping.add_argument("--json", action="store_true", help="Output ping results in JSON format")
+    p_server_ping.set_defaults(func=cmd_server_ping)
 
     # run
     p_run = subparsers.add_parser("run", help="Execute command inside guarded sandbox")

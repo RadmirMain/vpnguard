@@ -40,6 +40,30 @@ public struct ImportVlessResponse: Codable {
     public let message: String?
 }
 
+public struct ServerPingResult: Codable, Identifiable, Equatable {
+    public let id: String
+    public let name: String
+    public let host: String
+    public let ip: String?
+    public let port: Int
+    public let latencyMs: Int?
+    public let reachable: Bool
+    public let error: String?
+}
+
+public struct UpdateCheckResult: Codable, Equatable {
+    public let updateAvailable: Bool
+    public let backendUpdateNeeded: Bool
+    public let frontendUpdateNeeded: Bool
+    public let remoteAheadCount: Int
+    public let localDirty: Bool
+    public let headCommit: String
+    public let installedBackendHash: String
+    public let currentBackendHash: String
+    public let installedFrontendHash: String
+    public let currentFrontendHash: String
+}
+
 public struct VlessParsedPreview: Equatable {
     public let name: String
     public let host: String
