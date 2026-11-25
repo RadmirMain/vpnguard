@@ -170,13 +170,16 @@ pass out quick proto { tcp, udp } from any to { <ip1>, <ip2> } port <port> group
 
 ## 6. Сборка, самообновление и структура `VPNGuardApp`
 
-### 6.1. Двухэтапное обновление (`update.sh`)
-- `update.sh --check` выполняет `git fetch` с таймаутом `5с` (`GIT_TERMINAL_PROMPT=0`) и сравнивает:
-  - хеш бэкенда (`src/`, `bin/`, `install.sh` через `LC_ALL=C sort -z`) с `/usr/local/etc/vpnguard/backend.sha256`;
-  - хеш фронтенда (`Package.swift`, `build_app.sh`, `Resources/`, `Sources/`) с `/Applications/VPNGuard.app/Contents/Resources/frontend.sha256`.
-- Если оба совпадают, возвращает `VPNGUARD_UP_TO_DATE` без пересборки и перезапуска.
-- Сборка `.app` всегда идёт от обычного пользователя в `/tmp`, `frontend.sha256` и `xattr -cr` выполняются **до** `codesign --force --deep --sign -`.
-- Elevation через Touch ID (`osascript`) вызывается только при изменении бэкенда (`install.sh --backend-only`), при этом `install.sh` определяет `TARGET_USER` через `stat -f '%Su' /dev/console`.
+### 6.1. Релизный пайплайн GitHub Releases и локальное обновление (`update.sh`)
+- **Единый источник версии**: файл `VERSION` в корне репозитория считывается в `build_app.sh`, `update.sh` и `.github/workflows/release.yml`, записываясь в `CFBundleShortVersionString` до подписи бандла.
+- **GitHub Releases (`.github/workflows/release.yml` + `GitHubReleaseUpdater.swift`)**:
+  - При пуше тега `v*` CI (`macos-14`) прогоняет Swift/Python-тесты, собирает `VPNGuard.app`, упаковывает системный бэкенд (`src/`, `bin/`, `install.sh`, `backend.sha256`) в `Contents/Resources/backend/`, пакует бандл через `ditto`, считает `.sha256` и подписывает архив приватным ключом **Ed25519** (`RELEASE_SIGNING_PRIVATE_KEY` → `.sig`).
+  - Приложение опрашивает `releases/latest` с `ETag` / `If-None-Match` (при `403` — `HEAD` redirect-фолбэк), проверяет Ed25519-подпись по вшитому публичному ключу, `SHA-256` и `codesign`, подготавливает staging на разделе `/Applications` и перезапускается без `open -n` с таймаутом ожидания PID `10с`.
+  - После запуска новой версии приложение сверяет встроенный `backend.sha256` с `/usr/local/etc/vpnguard/backend.sha256` и при расхождении предлагает обновить системный слой через Touch ID (`install.sh --backend-only`).
+- **Локальное двухэтапное обновление (`update.sh`)**:
+  - `update.sh --check` выполняет `git fetch` с таймаутом `5с` (`GIT_TERMINAL_PROMPT=0`) и сравнивает `backend.sha256` и `frontend.sha256`.
+  - Сборка `.app` идёт от обычного пользователя в `/tmp`, `frontend.sha256`, `Resources/backend/` и `xattr -cr` выполняются **до** `codesign --force --deep --sign -`.
+  - Elevation через Touch ID (`osascript`) вызывается только при изменении бэкенда (`install.sh --backend-only`), при этом `install.sh` определяет `TARGET_USER` через `stat -f '%Su' /dev/console`.
 
 ### 6.2. Структура `app/VPNGuardApp`
 ```
@@ -196,26 +199,27 @@ app/VPNGuardApp/
 │   │   ├── RulesModels.swift
 │   │   ├── ServerModels.swift       # VlessPreviewParser, ServerPingResult, UpdateCheckResult
 │   │   ├── StatusModels.swift       # SystemStatus (+ pauseUntil)
-│   │   └── TrafficModels.swift
+│   │   └── TrafficModels.swift      # ClashConnection, ByteFormatter
 │   ├── Services/
 │   │   ├── AppDiscoveryService.swift
 │   │   ├── CLIExecutor.swift        # stdinData + конкурентный Pipe + timeout
+│   │   ├── GitHubReleaseUpdater.swift # Ed25519 + SHA-256 + ETag + backend.sha256 sync
 │   │   ├── TrafficMonitorService.swift # WebSocket /connections & /traffic + автореконнект
-│   │   └── VPNGuardService.swift    # CLI wrapper, direct browser launcher, 204 health probe, updater
+│   │   └── VPNGuardService.swift    # CLI wrapper, direct browser launcher, 204 health probe, update.sh
 │   ├── ViewModels/
 │   │   └── VPNGuardViewModel.swift  # Поллинг, NWPathMonitor (2.5с debounce + 6с wake grace), failover, 1-click upsert
 │   └── Views/
 │       ├── Apps/ (AppPickerSheet.swift, AppsManagementView.swift)
-│       ├── Common/ (GlassCard.swift, ToastView.swift)
+│       ├── Common/ (DesignSystem.swift, GlassCard.swift, ToastView.swift)
 │       ├── Dashboard/DashboardView.swift
-│       ├── Diagnostics/DiagnosticsView.swift # 12-point audit + sanitized log viewer + MD export
-│       ├── MenuBar/MenuBarExtraView.swift    # Pause 5m/15m, Tunnel Health, Browser Launcher
-│       ├── Server/ServerConfigView.swift     # VLESS import, GID 890 Ping, Sort, Auto-Failover
-│       ├── Traffic/TrafficMonitorView.swift  # Grouping + 1-click Direct/VPN + ContextMenu
+│       ├── Diagnostics/DiagnosticsView.swift # Под-вкладки Аудит/Логи + ANSI AttributedString + MD export
+│       ├── MenuBar/MenuBarExtraView.swift    # Pause 5m/15m, Tunnel Health, Browser Launcher, Update Banner
+│       ├── Server/ServerConfigView.swift     # Единый список серверов, AddServerSheet, GID 890 Ping, Auto-Failover
+│       ├── Traffic/TrafficMonitorView.swift  # Grouping + [VPN|Direct] переключатель + ContextMenu
 │       ├── Websites/WebsitesManagementView.swift
-│       └── MainContainerView.swift           # Sidebar + AppUpdateSheetView
+│       └── MainContainerView.swift           # Monochrome Sidebar + AppUpdateSheetView
 └── Tests/VPNGuardAppTests/
-    └── VPNGuardAppTests.swift
+    └── VPNGuardAppTests.swift                # 10 unit-тестов (включая форматтеры и Ed25519)
 ```
 
 ---

@@ -1,7 +1,7 @@
 # ==============================================================================
 # VPNGuard Shell Integration Snippet
 # Add to your ~/.zshrc or ~/.bashrc:
-#   source "${HOME}/Developer/vpnguard/wrappers/zshrc_snippet.sh"
+#   source "${HOME}/Desktop/Business/Кодинг/VPNGuard/wrappers/zshrc_snippet.sh"
 # ==============================================================================
 
 if command -v vpnguard &>/dev/null; then

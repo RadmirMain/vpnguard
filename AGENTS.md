@@ -1,9 +1,11 @@
 # AGENTS.md — VPNGuard 3.0 Repository Guide for AI Agents
 
-This file is the primary operational reference for AI coding agents working in `~/Developer/vpnguard`.
+This file is the primary operational reference for AI coding agents working in `~/Desktop/Business/Кодинг/VPNGuard` (GitHub: `RadmirMain/vpnguard`).
 For user setup and CLI reference see [README.md](README.md). For deep architectural diagrams and PF/sing-box specifications see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## 1. Repository Layout
+- `VERSION` / `LICENSE` — Single source of truth for app version (`CFBundleShortVersionString`) and MIT license.
+- `.github/workflows/release.yml` — CI/CD workflow on `macos-14`: runs Swift/Python unit tests, builds `VPNGuard.app` with bundled `backend/`, packages via `ditto`, computes `.sha256`, signs with Ed25519 (`RELEASE_SIGNING_PRIVATE_KEY` secret -> `.sig`), and publishes to GitHub Releases.
 - `src/vpnguard.py` — Main Python 3 CLI & privileged control plane (installed to `/usr/local/share/vpnguard/src/vpnguard.py` and invoked via `/usr/local/bin/vpnguard`).
 - `src/vpnguard_exec.c` — C setuid-root sandbox launcher (`04750 root:admin`, GID `888`, compiled by `install.sh`).
 - `src/browser/vpnguard-browser` — Hardened Chromium launcher inside GID `888`.
@@ -27,9 +29,10 @@ For user setup and CLI reference see [README.md](README.md). For deep architectu
    - `GID 889` (`_vpnguard_proxy`): headless Xray daemon; outbound allowed only to `vpnguard/egress`.
    - `GID 890` (`vpnguard-tun`): headless `sing-box` daemon (`utun99`); PF allows IPv4 TCP/UDP egress.
    - Any direct bypass probe while `utun99` is active (`server ping`, `server sync-pf` UDP DNS) MUST run inside `_run_in_gid890_worker()` (`setgroups([890])` -> `setgid(890)` -> `setuid(nobody)` in that exact order) with `IP_BOUND_IF = 25` on the physical interface from `netstat -rn -f inet`.
-4. **macOS App Signing & Launch Behavior**:
+4. **macOS App Signing, Releases & Launch Behavior**:
    - `VPNGuard.app` uses ad-hoc signing (`codesign --force --deep --sign -`).
-   - Write `Contents/Resources/frontend.sha256` and run `xattr -cr` **strictly before** `codesign`. Never mutate bundle files or `Info.plist` after signing.
+   - Write `Contents/Resources/frontend.sha256`, bundle `Contents/Resources/backend/` (with `backend.sha256`), set `CFBundleShortVersionString` from `VERSION`, and run `xattr -cr` **strictly before** `codesign`. Never mutate bundle files or `Info.plist` after signing.
+   - `GitHubReleaseUpdater` verifies Ed25519 `.sig` against its embedded public key and `.sha256` before extraction, stages onto `/Applications`, and relaunches without `open -n`.
    - Store mutable user preferences (`sourceRepoPath`, `autoFailoverEnabled`) in `UserDefaults`, never `Info.plist`.
    - Login autostart uses solely `~/Library/LaunchAgents/com.vpnguard.app.plist` (never `SMAppService` or `System Events` Login Items).
    - Launch `vpnguard-browser` directly as the console user (never via `sudo`) and redirect stdout/stderr to a log file (never leave an undrained `Pipe()` on Chromium).
@@ -52,6 +55,6 @@ swift build --package-path app/VPNGuardApp -c release --arch arm64
 ```
 Live check on a configured host:
 ```bash
-~/Developer/vpnguard/update.sh --check --no-pull
+./update.sh --check --no-pull
 sudo -n /usr/local/bin/vpnguard test --json
 ```
