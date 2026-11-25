@@ -176,4 +176,27 @@ final class VPNGuardAppTests: XCTestCase {
         let ansi = "\u{001B}[32mINFO\u{001B}[0m connected"
         XCTAssertEqual(VGFormatters.stripANSI(ansi), "INFO connected")
     }
+
+    func testGitHubReleaseSemanticVersionComparisonAndDecoding() throws {
+        XCTAssertEqual(GitHubReleaseUpdater.compareSemanticVersions("3.1.0", "3.0.0"), 1)
+        XCTAssertEqual(GitHubReleaseUpdater.compareSemanticVersions("3.0.0", "3.0.0"), 0)
+        XCTAssertEqual(GitHubReleaseUpdater.compareSemanticVersions("3.0.10", "3.0.2"), 1)
+        XCTAssertEqual(GitHubReleaseUpdater.compareSemanticVersions("2.9.9", "3.0.0"), -1)
+
+        let json = """
+        {
+          "tag_name": "v3.1.0",
+          "name": "VPNGuard v3.1.0",
+          "html_url": "https://github.com/RadmirMain/vpnguard/releases/tag/v3.1.0",
+          "assets": [
+            { "name": "VPNGuard-macos-arm64.zip", "browser_download_url": "https://example.com/app.zip", "size": 5200000 },
+            { "name": "VPNGuard-macos-arm64.zip.sha256", "browser_download_url": "https://example.com/app.zip.sha256", "size": 90 }
+          ]
+        }
+        """
+        let release = try JSONDecoder().decode(GitHubReleaseInfo.self, from: Data(json.utf8))
+        XCTAssertEqual(release.cleanVersion, "3.1.0")
+        XCTAssertEqual(release.zipAsset?.name, "VPNGuard-macos-arm64.zip")
+        XCTAssertEqual(release.sha256Asset?.name, "VPNGuard-macos-arm64.zip.sha256")
+    }
 }

@@ -118,6 +118,7 @@ public final class VPNGuardViewModel: ObservableObject {
             await loadRules()
             await loadServers()
             await runTunnelHealthCheck(allowFailover: false)
+            await GitHubReleaseUpdater.shared.checkIfDailyDue()
         }
         startTimers()
         startNetworkMonitor()

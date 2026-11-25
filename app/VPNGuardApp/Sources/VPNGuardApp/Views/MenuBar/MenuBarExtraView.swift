@@ -3,6 +3,7 @@ import AppKit
 
 public struct MenuBarExtraView: View {
     @ObservedObject var vm: VPNGuardViewModel
+    @ObservedObject private var releaseUpdater = GitHubReleaseUpdater.shared
     var onOpenSettings: () -> Void
 
     public init(vm: VPNGuardViewModel, onOpenSettings: @escaping () -> Void) {
@@ -16,7 +17,7 @@ public struct MenuBarExtraView: View {
             statusHeader
 
             // MARK: - Update Available Quick Banner
-            if vm.updateCheckResult?.updateAvailable == true {
+            if releaseUpdater.isUpdateAvailable || vm.updateCheckResult?.updateAvailable == true {
                 updateBanner
             }
 

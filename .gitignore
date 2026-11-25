@@ -3,8 +3,13 @@
 src/xray/xray.json
 src/servers.json
 servers.json
+api_secret
+.env
+.env.*
 *.key
 *.pem
+*.p12
+*.mobileprovision
 *.secret
 
 # Logs

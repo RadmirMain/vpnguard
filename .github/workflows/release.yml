@@ -1,0 +1,77 @@
+name: Release VPNGuard macOS
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. 3.1.0)'
+        required: true
+        default: '3.0.1'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Swift unit tests
+        working-directory: app/VPNGuardApp
+        run: swift test
+
+      - name: Run Python unit tests
+        run: |
+          python3 -m unittest tests/test_launcher.py tests/test_pf_syntax.py tests/test_singbox_config.py tests/test_vless_parser.py tests/test_logs_and_routing.py tests/test_pause_and_ping.py
+
+      - name: Determine release version
+        id: ver
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+            TAG="v${VERSION#v}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build VPNGuard.app (Release arm64)
+        working-directory: app/VPNGuardApp
+        run: |
+          swift build -c release --arch arm64
+          mkdir -p dist/VPNGuard.app/Contents/MacOS
+          mkdir -p dist/VPNGuard.app/Contents/Resources
+          cp .build/release/VPNGuardApp dist/VPNGuard.app/Contents/MacOS/VPNGuardApp
+          chmod +x dist/VPNGuard.app/Contents/MacOS/VPNGuardApp
+          cp Resources/Info.plist dist/VPNGuard.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ steps.ver.outputs.version }}" dist/VPNGuard.app/Contents/Info.plist
+          if [[ -f Resources/AppIcon.icns ]]; then
+            cp Resources/AppIcon.icns dist/VPNGuard.app/Contents/Resources/AppIcon.icns
+          fi
+          echo -n "APPL????" > dist/VPNGuard.app/Contents/PkgInfo
+          (find Sources Resources -type f | sort | xargs cat; cat Package.swift) | shasum -a 256 | awk '{print $1}' > dist/VPNGuard.app/Contents/Resources/frontend.sha256
+          codesign --force --deep --sign - dist/VPNGuard.app
+
+      - name: Package ZIP and compute SHA-256
+        working-directory: app/VPNGuardApp/dist
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent VPNGuard.app VPNGuard-macos-arm64.zip
+          shasum -a 256 VPNGuard-macos-arm64.zip > VPNGuard-macos-arm64.zip.sha256
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: VPNGuard ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            app/VPNGuardApp/dist/VPNGuard-macos-arm64.zip
+            app/VPNGuardApp/dist/VPNGuard-macos-arm64.zip.sha256
