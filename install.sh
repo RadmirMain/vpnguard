@@ -15,7 +15,21 @@ C_YELLOW="\033[33m"
 C_CYAN="\033[36m"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET_USER="${SUDO_USER:-$(id -un)}"
+BACKEND_ONLY=0
+for arg in "$@"; do
+    case "${arg}" in
+        --backend-only) BACKEND_ONLY=1 ;;
+    esac
+done
+
+CONSOLE_USER="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    TARGET_USER="${SUDO_USER}"
+elif [[ -n "${CONSOLE_USER}" && "${CONSOLE_USER}" != "root" && "${CONSOLE_USER}" != "loginwindow" ]]; then
+    TARGET_USER="${CONSOLE_USER}"
+else
+    TARGET_USER="$(id -un)"
+fi
 TARGET_HOME=$(dscl . -read "/Users/${TARGET_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || echo "/Users/${TARGET_USER}")
 
 echo -e "\n${C_BOLD}${C_CYAN}=== 🛡️  Installing VPNGuard 3.0 Unified System-Wide Protection ===${C_RESET}\n"
@@ -313,6 +327,9 @@ Defaults:%admin env_reset
 %admin ALL=(ALL) NOPASSWD: /sbin/pfctl -s info, /sbin/pfctl -sr, /sbin/pfctl -a vpnguard -s rules, /sbin/pfctl -a vpnguard -s rules -v, /sbin/pfctl -a vpnguard/egress -s rules
 %admin ALL=(ALL) NOPASSWD: /usr/local/bin/vpnguard on, \
     /usr/local/bin/vpnguard off, \
+    /usr/local/bin/vpnguard pause 300, \
+    /usr/local/bin/vpnguard pause 900, \
+    /usr/local/bin/vpnguard resume-if-expired, \
     /usr/local/bin/vpnguard dns-sync, \
     /usr/local/bin/vpnguard status, \
     /usr/local/bin/vpnguard status --json, \
@@ -353,6 +370,22 @@ launchctl kickstart -k system/com.vpnguard.singbox 2>/dev/null || true
 
 /usr/local/libexec/vpnguard-pf-boot.sh on
 /usr/local/bin/vpnguard dns-sync || true
+
+# Persist backend source hash so update.sh knows when Touch ID elevation is required
+(
+    cd "${SCRIPT_DIR}"
+    find src bin install.sh -type f \
+        ! -name 'vpnguard-xray' ! -name 'vpnguard-exec' \
+        ! -path '*/__pycache__/*' ! -name '*.pyc' ! -name '.DS_Store' \
+        -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}' > /usr/local/etc/vpnguard/backend.sha256
+)
+chown root:wheel /usr/local/etc/vpnguard/backend.sha256 2>/dev/null || true
+chmod 644 /usr/local/etc/vpnguard/backend.sha256 2>/dev/null || true
+
+if [[ "${BACKEND_ONLY}" -eq 1 ]]; then
+    echo -e "\n${C_BOLD}${C_GREEN}✓ VPNGuard 3.0 backend update completed successfully.${C_RESET}\n"
+    exit 0
+fi
 
 echo -e "\n${C_BOLD}${C_GREEN}🎉 VPNGuard 3.0 Unified System-Wide Installation Completed Successfully!${C_RESET}\n"
 echo -e "${C_YELLOW}[i] Note:${C_RESET} User '${TARGET_USER}' was removed from group 'vpnguard' (GID 888) to enforce browser profile isolation."

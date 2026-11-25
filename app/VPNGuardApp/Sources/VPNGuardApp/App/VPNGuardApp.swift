@@ -16,8 +16,21 @@ public struct VPNGuardApp: App {
                 openControlCenter()
             }
         } label: {
-            Image(systemName: vm.isProtectionActive ? "shield.fill" : "shield.slash.fill")
-                .foregroundColor(vm.isProtectionActive ? .green : .secondary)
+            HStack(spacing: 4) {
+                if vm.pauseRemainingSeconds > 0 {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .foregroundColor(.orange)
+                    if let countdown = vm.menuBarPauseText {
+                        Text(countdown)
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundColor(.orange)
+                    }
+                } else {
+                    Image(systemName: vm.isProtectionActive ? "shield.fill" : "shield.slash.fill")
+                        .foregroundColor(vm.isProtectionActive ? .green : .secondary)
+                }
+            }
         }
         .menuBarExtraStyle(.window)
         

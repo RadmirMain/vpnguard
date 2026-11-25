@@ -51,6 +51,8 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 DEFAULT_CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
 USER_CONFIG_PATH = os.path.expanduser("~/.vpnguard/config.json")
 RUN_DIR = "/var/run/vpnguard"
+PAUSE_UNTIL_FILE = os.path.join(RUN_DIR, "pause_until")
+PAUSE_WATCHER_PID_FILE = os.path.join(RUN_DIR, "pause_watcher.pid")
 EXEC_HELPER_PATH = "/usr/local/bin/vpnguard-exec"
 LOCAL_EXEC_HELPER = os.path.join(PROJECT_ROOT, "bin", "vpnguard-exec")
 
@@ -1087,6 +1089,9 @@ def cmd_status(args: argparse.Namespace) -> int:
             org = proxy_info.get("org", "")
             exit_loc = f"{city}, {country} ({org})" if city else f"{country} ({org})"
 
+        pause_ts = _read_pause_until()
+        active_pause_until = pause_ts if (not is_on and pause_ts is not None and pause_ts > time.time()) else None
+
         status_data = {
             "isProtectionOn": is_on,
             "pfEnabled": pf_info["enabled"],
@@ -1111,7 +1116,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             "activeServerId": None,
             "activeServerName": None,
             "clashApiUrl": "127.0.0.1:9090",
-            "clashApiSecret": clash_secret
+            "clashApiSecret": clash_secret,
+            "pauseUntil": active_pause_until
         }
         if os.path.exists(SERVERS_FILE_PATH):
             try:
@@ -1236,11 +1242,103 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 1
 
 
+def _read_pause_until(pause_file: Optional[str] = None) -> Optional[int]:
+    """Read Unix timestamp from pause_until file, or None if missing/invalid."""
+    target_file = pause_file or PAUSE_UNTIL_FILE
+    if not os.path.exists(target_file):
+        return None
+    try:
+        with open(target_file, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+        val = int(raw)
+        return val if val > 0 else None
+    except Exception:
+        return None
+
+
+def _is_pause_watcher_alive(pid_file: Optional[str] = None) -> Optional[int]:
+    """Return PID if an active vpnguard pause-watcher process is running, else None."""
+    target_file = pid_file or PAUSE_WATCHER_PID_FILE
+    if not os.path.exists(target_file):
+        return None
+    try:
+        with open(target_file, "r", encoding="utf-8") as f:
+            pid = int(f.read().strip())
+        if pid <= 0 or pid == os.getpid():
+            return None
+        os.kill(pid, 0)
+        res = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+        if res.returncode == 0 and "pause-watcher" in res.stdout:
+            return pid
+    except Exception:
+        pass
+    return None
+
+
+def _clear_pause_state(run_dir: Optional[str] = None, kill_watcher: bool = True) -> None:
+    """Remove pause_until / pause_watcher.pid and terminate any active pause-watcher."""
+    target_dir = run_dir or RUN_DIR
+    pause_file = os.path.join(target_dir, "pause_until")
+    pid_file = os.path.join(target_dir, "pause_watcher.pid")
+
+    if kill_watcher:
+        alive_pid = _is_pause_watcher_alive(pid_file)
+        if alive_pid is not None:
+            try:
+                import signal as _signal
+                os.kill(alive_pid, _signal.SIGTERM)
+            except Exception:
+                pass
+
+    for path in (pause_file, pid_file):
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+
+def _disable_protection_core(quiet: bool = False) -> None:
+    """Disarm PF kill-switch, stop sing-box, and restore original system DNS."""
+    if not quiet:
+        print(f"\n{C_BOLD}{C_YELLOW}=== ⚠️  Disabling VPNGuard Protection (Captive Portal Mode) ==={C_RESET}\n")
+        print(f"{C_BOLD}[1/3] Disarming PF Kill-Switch...{C_RESET}")
+
+    res_pf = subprocess.run(["/usr/local/libexec/vpnguard-pf-boot.sh", "off"], capture_output=True, text=True)
+    if not quiet:
+        if res_pf.returncode == 0:
+            print(f"    {C_GREEN}✓ PF Kill-Switch disarmed (Direct physical egress allowed){C_RESET}")
+        else:
+            print(f"    {C_RED}[!] Warning: {res_pf.stderr.strip()}{C_RESET}")
+        print(f"\n{C_BOLD}[2/3] Stopping vpnguard-singbox TUN daemon...{C_RESET}")
+
+    subprocess.run(["launchctl", "bootout", "system/com.vpnguard.singbox"], capture_output=True)
+    time.sleep(0.5)
+    subprocess.run(["pkill", "-9", "-f", "/usr/local/libexec/vpnguard-singbox"], capture_output=True)
+    singbox = get_singbox_process_status()
+    if not quiet:
+        if not singbox["running"]:
+            print(f"    {C_GREEN}✓ vpnguard-singbox stopped successfully (utun99 released){C_RESET}")
+        else:
+            print(f"    {C_YELLOW}[!] vpnguard-singbox still running (PID {singbox['pid']}){C_RESET}")
+        print(f"\n{C_BOLD}[3/3] Restoring original DNS and flushing caches...{C_RESET}")
+
+    dns_ok, dns_msg = restore_system_dns()
+    if not quiet:
+        if dns_ok:
+            print(f"    {C_GREEN}✓ {dns_msg}{C_RESET}")
+        else:
+            print(f"    {C_YELLOW}[!] {dns_msg}{C_RESET}")
+
+
 def cmd_on(args: argparse.Namespace) -> int:
     """Start VPNGuard services (xray + sing-box), arm fail-closed PF kill-switch, and lock DNS."""
     if os.geteuid() != 0:
         print(f"{C_RED}[!] 'vpnguard on' requires root privileges. Run: sudo vpnguard on{C_RESET}", file=sys.stderr)
         return 1
+
+    # Cancel any pending Wi-Fi pause timer & watcher when enabling protection manually
+    _clear_pause_state(kill_watcher=True)
 
     print(f"\n{C_BOLD}{C_CYAN}=== 🛡️  Enabling VPNGuard Unified System Protection ==={C_RESET}\n")
 
@@ -1347,37 +1445,101 @@ def cmd_off(args: argparse.Namespace) -> int:
         print(f"{C_RED}[!] 'vpnguard off' requires root privileges. Run: sudo vpnguard off{C_RESET}", file=sys.stderr)
         return 1
 
-    print(f"\n{C_BOLD}{C_YELLOW}=== ⚠️  Disabling VPNGuard Protection (Captive Portal Mode) ==={C_RESET}\n")
-
-    # 1. Flush PF anchor rules (Kill-Switch OFF)
-    print(f"{C_BOLD}[1/3] Disarming PF Kill-Switch...{C_RESET}")
-    res_pf = subprocess.run(["/usr/local/libexec/vpnguard-pf-boot.sh", "off"], capture_output=True, text=True)
-    if res_pf.returncode == 0:
-        print(f"    {C_GREEN}✓ PF Kill-Switch disarmed (Direct physical egress allowed){C_RESET}")
-    else:
-        print(f"    {C_RED}[!] Warning: {res_pf.stderr.strip()}{C_RESET}")
-
-    # 2. Stop sing-box daemon and release utun99
-    print(f"\n{C_BOLD}[2/3] Stopping vpnguard-singbox TUN daemon...{C_RESET}")
-    subprocess.run(["launchctl", "bootout", "system/com.vpnguard.singbox"], capture_output=True)
-    time.sleep(0.5)
-    subprocess.run(["pkill", "-9", "-f", "/usr/local/libexec/vpnguard-singbox"], capture_output=True)
-    singbox = get_singbox_process_status()
-    if not singbox["running"]:
-        print(f"    {C_GREEN}✓ vpnguard-singbox stopped successfully (utun99 released){C_RESET}")
-    else:
-        print(f"    {C_YELLOW}[!] vpnguard-singbox still running (PID {singbox['pid']}){C_RESET}")
-
-    # 3. Restore original DNS and flush cache
-    print(f"\n{C_BOLD}[3/3] Restoring original DNS and flushing caches...{C_RESET}")
-    dns_ok, dns_msg = restore_system_dns()
-    if dns_ok:
-        print(f"    {C_GREEN}✓ {dns_msg}{C_RESET}")
-    else:
-        print(f"    {C_YELLOW}[!] {dns_msg}{C_RESET}")
+    _clear_pause_state(kill_watcher=True)
+    _disable_protection_core(quiet=False)
 
     print(f"\n{C_BOLD}{C_GREEN}✅ Direct internet access restored. Captive portal login is now possible.{C_RESET}")
     print(f"{C_DIM}Run 'sudo vpnguard on' to re-enable fail-closed protection.{C_RESET}\n")
+    return 0
+
+
+def cmd_pause(args: argparse.Namespace) -> int:
+    """Temporarily disable protection for <seconds> with a fail-safe background auto-resume watcher."""
+    if os.geteuid() != 0:
+        print(json.dumps({"status": "error", "message": "pause requires root privileges"}), file=sys.stderr)
+        return 1
+
+    try:
+        seconds = int(getattr(args, "seconds", 300))
+    except Exception:
+        print(json.dumps({"status": "error", "message": "Invalid pause duration"}), file=sys.stderr)
+        return 1
+
+    if not (60 <= seconds <= 3600):
+        print(json.dumps({"status": "error", "message": "Pause duration must be between 60 and 3600 seconds"}), file=sys.stderr)
+        return 1
+
+    pause_until = int(time.time()) + seconds
+    os.makedirs(RUN_DIR, exist_ok=True)
+    atomic_write_text(PAUSE_UNTIL_FILE, f"{pause_until}\n", mode=0o644)
+
+    _disable_protection_core(quiet=True)
+
+    watcher_pid = _is_pause_watcher_alive()
+    if watcher_pid is None:
+        proc = subprocess.Popen(
+            [sys.executable, "-s", os.path.realpath(__file__), "pause-watcher"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        watcher_pid = proc.pid
+        atomic_write_text(PAUSE_WATCHER_PID_FILE, f"{watcher_pid}\n", mode=0o644)
+
+    print(json.dumps({
+        "status": "ok",
+        "pauseUntil": pause_until,
+        "seconds": seconds,
+        "watcherPid": watcher_pid
+    }))
+    return 0
+
+
+def cmd_pause_watcher(args: argparse.Namespace) -> int:
+    """Internal wall-clock background watcher that re-arms VPNGuard when pause_until expires."""
+    if os.geteuid() != 0:
+        return 1
+
+    while True:
+        target_ts = _read_pause_until()
+        if target_ts is None:
+            _clear_pause_state(kill_watcher=False)
+            return 0
+
+        if time.time() >= target_ts:
+            _clear_pause_state(kill_watcher=False)
+            cmd_on(argparse.Namespace(json=True, fast=True))
+            notify("🛡️ VPNGuard", "Пауза Wi-Fi завершена. Защита и Kill-Switch снова активны.")
+            return 0
+
+        time.sleep(5)
+
+
+def cmd_resume_if_expired(args: argparse.Namespace) -> int:
+    """Re-arm protection immediately if pause_until exists and has expired."""
+    if os.geteuid() != 0:
+        print(json.dumps({"status": "error", "message": "resume-if-expired requires root"}), file=sys.stderr)
+        return 1
+
+    target_ts = _read_pause_until()
+    if target_ts is None:
+        print(json.dumps({"status": "noop", "reason": "no_pause"}))
+        return 0
+
+    now = time.time()
+    if now >= target_ts:
+        _clear_pause_state(kill_watcher=True)
+        rc = cmd_on(argparse.Namespace(json=True, fast=True))
+        if rc == 0:
+            notify("🛡️ VPNGuard", "Защита автоматически восстановлена после паузы.")
+        return rc
+
+    print(json.dumps({
+        "status": "waiting",
+        "pauseUntil": target_ts,
+        "remaining": max(0, int(target_ts - now))
+    }))
     return 0
 
 
@@ -3003,6 +3165,19 @@ def main() -> int:
     # off
     p_off = subparsers.add_parser("off", help="Disable killswitch and stop sing-box (Captive Portal mode)")
     p_off.set_defaults(func=cmd_off)
+
+    # pause
+    p_pause = subparsers.add_parser("pause", help="Temporarily disable protection with fail-safe auto-resume")
+    p_pause.add_argument("seconds", type=int, help="Pause duration in seconds (60-3600)")
+    p_pause.set_defaults(func=cmd_pause)
+
+    # pause-watcher (internal)
+    p_pause_watcher = subparsers.add_parser("pause-watcher", help=argparse.SUPPRESS)
+    p_pause_watcher.set_defaults(func=cmd_pause_watcher)
+
+    # resume-if-expired
+    p_resume_exp = subparsers.add_parser("resume-if-expired", help="Re-arm protection if pause timer expired")
+    p_resume_exp.set_defaults(func=cmd_resume_if_expired)
 
     # dns-sync
     p_dnssync = subparsers.add_parser("dns-sync", help="Sync active interface DNS to managed resolver while protection is on")

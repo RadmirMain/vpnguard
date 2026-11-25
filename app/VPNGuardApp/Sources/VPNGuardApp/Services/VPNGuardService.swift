@@ -60,6 +60,16 @@ public final class VPNGuardService {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    public func readLocalPauseUntil() -> Date? {
+        let path = "/var/run/vpnguard/pause_until"
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8),
+              let ts = TimeInterval(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              ts > Date().timeIntervalSince1970 else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: ts)
+    }
+
     // MARK: - Status
     public func fetchStatus(fast: Bool = false) async throws -> SystemStatus {
         let args = fast ? ["status", "--json", "--fast"] : ["status", "--json"]
@@ -101,6 +111,121 @@ public final class VPNGuardService {
         if !result.isSuccess {
             let details = result.stderr.isEmpty ? result.stdout : result.stderr
             throw VPNGuardError.commandFailed(details.isEmpty ? "Не удалось синхронизировать DNS" : details)
+        }
+    }
+
+    public func pauseProtection(seconds: Int = 300) async throws -> Date {
+        let allowed = (seconds == 900) ? "900" : "300"
+        let result = await executor.execute(arguments: ["pause", allowed], timeout: 25.0)
+        guard result.isSuccess else {
+            let details = result.stderr.isEmpty ? result.stdout : result.stderr
+            throw VPNGuardError.commandFailed(details.isEmpty ? "Не удалось поставить защиту на паузу" : details)
+        }
+        if let data = result.stdout.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let ts = obj["pauseUntil"] as? TimeInterval {
+            return Date(timeIntervalSince1970: ts)
+        }
+        return Date().addingTimeInterval(TimeInterval(seconds))
+    }
+
+    public func resumeIfExpired() async throws {
+        let result = await executor.execute(arguments: ["resume-if-expired"], timeout: 30.0)
+        if !result.isSuccess {
+            let details = result.stderr.isEmpty ? result.stdout : result.stderr
+            throw VPNGuardError.commandFailed(details.isEmpty ? "Не удалось восстановить защиту" : details)
+        }
+    }
+
+    // MARK: - Sandbox Launchers (Direct user execution, NEVER sudo)
+    public func launchProtectedBrowser() async throws {
+        let browserPath = "/usr/local/bin/vpnguard-browser"
+        guard FileManager.default.isExecutableFile(atPath: browserPath) else {
+            throw VPNGuardError.commandFailed("Не найден \(browserPath). Выполните установку/обновление бэкенда.")
+        }
+        try await launchDetachedProcess(executablePath: browserPath, arguments: [], logPath: "/tmp/vpnguard-browser-launch.log")
+    }
+
+    private func launchDetachedProcess(executablePath: String, arguments: [String], logPath: String) async throws {
+        FileManager.default.createFile(atPath: logPath, contents: nil, attributes: nil)
+        guard let logHandle = FileHandle(forWritingAtPath: logPath) else {
+            throw VPNGuardError.commandFailed("Не удалось открыть лог запуска \(logPath)")
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = logHandle
+        process.standardError = logHandle
+
+        do {
+            try process.run()
+        } catch {
+            try? logHandle.close()
+            throw VPNGuardError.commandFailed("Ошибка запуска: \(error.localizedDescription)")
+        }
+
+        // Close parent descriptor immediately so child never blocks on pipe buffers
+        try? logHandle.close()
+
+        // Check briefly if fail-closed pre-flight rejected launch (e.g. PF off or no Chrome)
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        if !process.isRunning && process.terminationStatus != 0 {
+            let rawLog = (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? ""
+            let snippet = String(rawLog.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))
+            throw VPNGuardError.commandFailed(snippet.isEmpty ? "Процесс завершился с кодом \(process.terminationStatus)" : snippet)
+        }
+    }
+
+    // MARK: - Native App & Backend Updater
+    public func runUpdateScript(repoPath: String, forceBackend: Bool) async throws -> String {
+        let scriptPath = (repoPath as NSString).appendingPathComponent("update.sh")
+        guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
+            throw VPNGuardError.commandFailed("Скрипт обновления не найден по пути: \(scriptPath)")
+        }
+
+        let currentPid = ProcessInfo.processInfo.processIdentifier
+        var args = [scriptPath, "--from-app-pid", "\(currentPid)"]
+        if forceBackend {
+            args.append("--force-backend")
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/bin/bash")
+                process.arguments = args
+                var env = ProcessInfo.processInfo.environment
+                env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                process.environment = env
+
+                let outPipe = Pipe()
+                let errPipe = Pipe()
+                process.standardOutput = outPipe
+                process.standardError = errPipe
+
+                do {
+                    try process.run()
+                } catch {
+                    continuation.resume(throwing: VPNGuardError.commandFailed(error.localizedDescription))
+                    return
+                }
+
+                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+
+                let outStr = String(data: outData, encoding: .utf8) ?? ""
+                let errStr = String(data: errData, encoding: .utf8) ?? ""
+                let combined = [outStr, errStr].filter { !$0.isEmpty }.joined(separator: "\n")
+
+                if process.terminationStatus == 0 {
+                    continuation.resume(returning: combined)
+                } else {
+                    continuation.resume(throwing: VPNGuardError.commandFailed(combined.isEmpty ? "Ошибка обновления (код \(process.terminationStatus))" : combined))
+                }
+            }
         }
     }
 

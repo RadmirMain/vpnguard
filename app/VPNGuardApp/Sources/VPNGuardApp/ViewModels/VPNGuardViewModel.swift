@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import AppKit
 import Combine
 import Network
 
@@ -32,16 +33,44 @@ public final class VPNGuardViewModel: ObservableObject {
     // System Integration
     @Published public var launchAtLogin: Bool = false
 
+    // Wi-Fi Captive Portal Pause State
+    @Published public var pauseEndDate: Date? = nil
+    @Published public var pauseRemainingSeconds: Int = 0
+    @Published public var isTogglingPause: Bool = false
+    @Published public var isLaunchingBrowser: Bool = false
+
+    // Self-Update State (stored in UserDefaults so ad-hoc signature stays intact)
+    private static let sourceRepoPathKey = "sourceRepoPath"
+    @Published public var sourceRepoPath: String
+    @Published public var isUpdatingApp: Bool = false
+    @Published public var updateLogOutput: String? = nil
+
     // Services & Timers
     private let service = VPNGuardService.shared
     private var nativeProbeCancellable: AnyCancellable?
     private var periodicSyncCancellable: AnyCancellable?
+    private var pauseCountdownCancellable: AnyCancellable?
+    private var wakeObserver: NSObjectProtocol?
     private var pathMonitor: NWPathMonitor?
     private var lastPathSignature: String? = nil
     private var networkChangeTask: Task<Void, Never>?
+    private var isResumingFromPause: Bool = false
 
     public init() {
+        let defaultRepo = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Developer/vpnguard").path
+        let storedRepo = UserDefaults.standard.string(forKey: Self.sourceRepoPathKey)
+        if let storedRepo, !storedRepo.isEmpty {
+            self.sourceRepoPath = storedRepo
+        } else {
+            self.sourceRepoPath = defaultRepo
+        }
+
         checkLaunchAtLoginStatus()
+
+        if let initialPauseEnd = service.readLocalPauseUntil() {
+            setPauseEndDate(initialPauseEnd)
+        }
 
         if let localSecret = service.readLocalApiSecret() {
             TrafficMonitorService.shared.configure(url: "127.0.0.1:9090", secret: localSecret)
@@ -54,13 +83,18 @@ public final class VPNGuardViewModel: ObservableObject {
         }
         startTimers()
         startNetworkMonitor()
+        startWakeObserver()
     }
 
     deinit {
         nativeProbeCancellable?.cancel()
         periodicSyncCancellable?.cancel()
+        pauseCountdownCancellable?.cancel()
         networkChangeTask?.cancel()
         pathMonitor?.cancel()
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
     }
 
     // MARK: - Hybrid Status Polling (Zero external HTTP spam)
@@ -74,10 +108,10 @@ public final class VPNGuardViewModel: ObservableObject {
             .sink { [weak self] _ in
                 guard let self else { return }
                 let utunUp = self.service.isUtunInterfaceUp(name: "utun99")
-                if !utunUp && self.isProtectionActive && !self.isTogglingPower {
+                if !utunUp && self.isProtectionActive && !self.isTogglingPower && !self.isTogglingPause {
                     self.isProtectionActive = false
                     Task { await self.refreshStatus(fast: true) }
-                } else if utunUp && !self.isProtectionActive && !self.isTogglingPower {
+                } else if utunUp && !self.isProtectionActive && !self.isTogglingPower && !self.isTogglingPause {
                     Task { await self.refreshStatus(fast: true) }
                 }
             }
@@ -149,13 +183,23 @@ public final class VPNGuardViewModel: ObservableObject {
                     activeServerId: newStatus.activeServerId,
                     activeServerName: newStatus.activeServerName,
                     clashApiUrl: newStatus.clashApiUrl,
-                    clashApiSecret: newStatus.clashApiSecret
+                    clashApiSecret: newStatus.clashApiSecret,
+                    pauseUntil: newStatus.pauseUntil
                 )
             } else {
                 self.status = newStatus
             }
             self.isProtectionActive = newStatus.isProtectionOn
             self.statusError = nil
+            if newStatus.isProtectionOn {
+                setPauseEndDate(nil)
+            } else if let ts = newStatus.pauseUntil, ts > Date().timeIntervalSince1970 {
+                setPauseEndDate(Date(timeIntervalSince1970: ts))
+            } else if let localEnd = service.readLocalPauseUntil() {
+                setPauseEndDate(localEnd)
+            } else {
+                setPauseEndDate(nil)
+            }
             TrafficMonitorService.shared.configure(url: newStatus.clashApiUrl, secret: newStatus.clashApiSecret)
         } catch {
             self.statusError = error.localizedDescription
@@ -173,9 +217,11 @@ public final class VPNGuardViewModel: ObservableObject {
             if targetState {
                 showToast("Включение защиты VPNGuard...", isError: false)
                 try await service.turnOn()
+                setPauseEndDate(nil)
             } else {
                 showToast("Отключение защиты...", isError: false)
                 try await service.turnOff()
+                setPauseEndDate(nil)
             }
             await refreshStatus(fast: !targetState)
             showToast(targetState ? "Защита VPNGuard активирована" : "Защита отключена", isError: false)
@@ -184,6 +230,157 @@ public final class VPNGuardViewModel: ObservableObject {
             await refreshStatus(fast: true)
         }
         isTogglingPower = false
+    }
+
+    // MARK: - Wi-Fi Captive Portal Pause
+    public var menuBarPauseText: String? {
+        guard pauseRemainingSeconds > 0 else { return nil }
+        let mins = pauseRemainingSeconds / 60
+        let secs = pauseRemainingSeconds % 60
+        return String(format: "%02d:%02d", mins, secs)
+    }
+
+    public func pauseForWifi(seconds: Int = 300) async {
+        guard !isTogglingPause && !isTogglingPower else { return }
+        isTogglingPause = true
+        defer { isTogglingPause = false }
+
+        do {
+            showToast("Пауза защиты для входа в Wi-Fi...", isError: false)
+            let endDate = try await service.pauseProtection(seconds: seconds)
+            setPauseEndDate(endDate)
+            await refreshStatus(fast: true)
+            let mins = seconds / 60
+            showToast("Пауза на \(mins) мин активна. Защита включится автоматически.", isError: false)
+        } catch {
+            showToast("Ошибка паузы: \(error.localizedDescription)", isError: true)
+            await refreshStatus(fast: true)
+        }
+    }
+
+    public func resumeFromPauseNow() async {
+        guard !isTogglingPause && !isTogglingPower else { return }
+        isTogglingPause = true
+        defer { isTogglingPause = false }
+
+        do {
+            showToast("Возобновление защиты VPNGuard...", isError: false)
+            try await service.turnOn()
+            setPauseEndDate(nil)
+            await refreshStatus(fast: false)
+            showToast("Защита VPNGuard восстановлена", isError: false)
+        } catch {
+            showToast("Ошибка возобновления: \(error.localizedDescription)", isError: true)
+            await refreshStatus(fast: true)
+        }
+    }
+
+    private func setPauseEndDate(_ date: Date?) {
+        pauseEndDate = date
+        pauseCountdownCancellable?.cancel()
+        pauseCountdownCancellable = nil
+
+        guard let target = date else {
+            pauseRemainingSeconds = 0
+            return
+        }
+
+        let rem = max(0, Int(ceil(target.timeIntervalSinceNow)))
+        pauseRemainingSeconds = rem
+        if rem == 0 {
+            Task { await handlePauseExpiration() }
+            return
+        }
+
+        pauseCountdownCancellable = Timer.publish(every: 1.0, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self, let end = self.pauseEndDate else { return }
+                let left = max(0, Int(ceil(end.timeIntervalSinceNow)))
+                self.pauseRemainingSeconds = left
+                if left <= 0 {
+                    self.pauseCountdownCancellable?.cancel()
+                    self.pauseCountdownCancellable = nil
+                    Task { await self.handlePauseExpiration() }
+                }
+            }
+    }
+
+    private func startWakeObserver() {
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let end = self.pauseEndDate, end.timeIntervalSinceNow <= 0 {
+                    await self.handlePauseExpiration()
+                } else if let localEnd = self.service.readLocalPauseUntil() {
+                    self.setPauseEndDate(localEnd)
+                } else {
+                    try? await self.service.resumeIfExpired()
+                    await self.refreshStatus(fast: true)
+                }
+            }
+        }
+    }
+
+    private func handlePauseExpiration() async {
+        guard !isResumingFromPause else { return }
+        isResumingFromPause = true
+        defer { isResumingFromPause = false }
+
+        do {
+            try await service.resumeIfExpired()
+            setPauseEndDate(nil)
+            await refreshStatus(fast: false)
+            if isProtectionActive {
+                showToast("Пауза завершена: защита снова активна", isError: false)
+            }
+        } catch {
+            await refreshStatus(fast: true)
+        }
+    }
+
+    // MARK: - Sandbox Browser Launcher (Non-root GID 888)
+    public func launchProtectedBrowser() async {
+        guard !isLaunchingBrowser else { return }
+        isLaunchingBrowser = true
+        defer { isLaunchingBrowser = false }
+
+        do {
+            showToast("Запуск защищённого браузера (GID 888)...", isError: false)
+            try await service.launchProtectedBrowser()
+        } catch {
+            showToast(error.localizedDescription, isError: true)
+        }
+    }
+
+    // MARK: - Self-Update (UserDefaults sourceRepoPath)
+    public func setSourceRepoPath(_ path: String) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        sourceRepoPath = trimmed
+        UserDefaults.standard.set(trimmed, forKey: Self.sourceRepoPathKey)
+    }
+
+    public func triggerAppUpdate(forceBackend: Bool = false) async {
+        guard !isUpdatingApp else { return }
+        isUpdatingApp = true
+        updateLogOutput = "Запуск обновления из \(sourceRepoPath)..."
+
+        do {
+            let output = try await service.runUpdateScript(repoPath: sourceRepoPath, forceBackend: forceBackend)
+            updateLogOutput = output
+            showToast("Обновление собрано. Перезапуск VPNGuard...", isError: false)
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            NSApp.terminate(nil)
+        } catch {
+            updateLogOutput = error.localizedDescription
+            showToast("Ошибка обновления: \(error.localizedDescription)", isError: true)
+            isUpdatingApp = false
+        }
     }
 
     // MARK: - Rules Management

@@ -25,12 +25,22 @@ public struct MenuBarExtraView: View {
                 
                 Spacer()
                 
-                Text(vm.isProtectionActive ? "АКТИВЕН" : "ОТКЛЮЧЕН")
-                    .font(.system(size: 10, weight: .bold))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(vm.isProtectionActive ? Color.green.opacity(0.15) : Color.orange.opacity(0.15), in: Capsule())
-                    .foregroundColor(vm.isProtectionActive ? .green : .orange)
+                if let countdown = vm.menuBarPauseText {
+                    Text("ПАУЗА \(countdown)")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .monospacedDigit()
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.orange.opacity(0.18), in: Capsule())
+                        .foregroundColor(.orange)
+                } else {
+                    Text(vm.isProtectionActive ? "АКТИВЕН" : "ОТКЛЮЧЕН")
+                        .font(.system(size: 10, weight: .bold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(vm.isProtectionActive ? Color.green.opacity(0.15) : Color.orange.opacity(0.15), in: Capsule())
+                        .foregroundColor(vm.isProtectionActive ? .green : .orange)
+                }
             }
             
             // Master Switch Button
@@ -66,7 +76,86 @@ public struct MenuBarExtraView: View {
                 )
             }
             .buttonStyle(.plain)
-            .disabled(vm.isTogglingPower)
+            .disabled(vm.isTogglingPower || vm.isTogglingPause)
+
+            // Wi-Fi Captive Portal Pause / Countdown Controls
+            if let countdown = vm.menuBarPauseText {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "wifi.exclamationmark")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 12))
+                        Text("Временный прямой доступ (Wi-Fi): \(countdown)")
+                            .font(.system(size: 11, weight: .semibold))
+                            .monospacedDigit()
+                            .foregroundColor(.orange)
+                        Spacer()
+                    }
+                    HStack(spacing: 8) {
+                        Button {
+                            Task { await vm.resumeFromPauseNow() }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "shield.fill")
+                                Text("Возобновить сейчас")
+                            }
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(Color.green.opacity(0.18), in: RoundedRectangle(cornerRadius: 6))
+                            .foregroundColor(.green)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(vm.isTogglingPause)
+
+                        Button {
+                            Task { await vm.pauseForWifi(seconds: 900) }
+                        } label: {
+                            Text("15 мин")
+                                .font(.system(size: 11, weight: .medium))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.orange.opacity(0.15), in: RoundedRectangle(cornerRadius: 6))
+                                .foregroundColor(.orange)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(vm.isTogglingPause)
+                        .help("Установить паузу на 15 минут")
+                    }
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.orange.opacity(0.25), lineWidth: 1)
+                )
+            } else if vm.isProtectionActive {
+                Button {
+                    Task { await vm.pauseForWifi(seconds: 300) }
+                } label: {
+                    HStack(spacing: 8) {
+                        if vm.isTogglingPause {
+                            ProgressView()
+                                .scaleEffect(0.6)
+                        } else {
+                            Image(systemName: "wifi")
+                                .font(.system(size: 12))
+                                .foregroundColor(.orange)
+                        }
+                        Text("Пауза на 5 мин (вход в Wi-Fi)")
+                            .font(.system(size: 12, weight: .medium))
+                        Spacer()
+                        Text("Автовозврат")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .disabled(vm.isTogglingPause || vm.isTogglingPower)
+            }
             
             // Connection Card
             GlassCard(padding: 12) {
@@ -216,6 +305,37 @@ public struct MenuBarExtraView: View {
                 }
             }
             
+            // Protected Browser Sandbox Launcher (GID 888, non-sudo)
+            Button {
+                Task { await vm.launchProtectedBrowser() }
+            } label: {
+                HStack(spacing: 8) {
+                    if vm.isLaunchingBrowser {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                    } else {
+                        Image(systemName: "safari")
+                            .font(.system(size: 12))
+                            .foregroundColor(vm.isProtectionActive ? .blue : .secondary)
+                    }
+                    Text("Открыть защищённый браузер")
+                        .font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    Text("GID 888")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.primary.opacity(0.06), in: Capsule())
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.blue.opacity(vm.isProtectionActive ? 0.1 : 0.04), in: RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
+            .disabled(!vm.isProtectionActive || vm.isLaunchingBrowser)
+            .help(vm.isProtectionActive ? "Запуск изолированного браузера в GID 888 песочнице" : "Сначала включите защиту VPNGuard")
+
             // Action Buttons
             HStack(spacing: 8) {
                 Button {

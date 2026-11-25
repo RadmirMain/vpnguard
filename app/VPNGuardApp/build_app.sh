@@ -4,14 +4,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_BUNDLE_NAME="VPNGuard.app"
 BUILD_DIR="${SCRIPT_DIR}/.build/release"
-OUTPUT_APP="${SCRIPT_DIR}/${APP_BUNDLE_NAME}"
+STAGING_ROOT="$(mktemp -d "/tmp/vpnguard-build.XXXXXX")"
+OUTPUT_APP="${STAGING_ROOT}/${APP_BUNDLE_NAME}"
+TARGET_APP="/Applications/${APP_BUNDLE_NAME}"
+
+cleanup() {
+    rm -rf "${STAGING_ROOT}"
+}
+trap cleanup EXIT
 
 echo "==> Building VPNGuardApp (Release arm64)..."
 cd "${SCRIPT_DIR}"
 swift build -c release --arch arm64
 
-echo "==> Assembling ${APP_BUNDLE_NAME}..."
-rm -rf "${OUTPUT_APP}"
+echo "==> Assembling ${APP_BUNDLE_NAME} in ${STAGING_ROOT}..."
 mkdir -p "${OUTPUT_APP}/Contents/MacOS"
 mkdir -p "${OUTPUT_APP}/Contents/Resources"
 
@@ -26,14 +32,22 @@ fi
 
 echo -n "APPL????" > "${OUTPUT_APP}/Contents/PkgInfo"
 
-echo "==> Ad-hoc signing ${APP_BUNDLE_NAME}..."
+echo "==> Stripping extended attributes & ad-hoc signing ${APP_BUNDLE_NAME}..."
+xattr -cr "${OUTPUT_APP}" 2>/dev/null || true
 codesign --force --deep --sign - "${OUTPUT_APP}"
 
-echo "==> Installing to /Applications/${APP_BUNDLE_NAME}..."
-rm -rf "/Applications/${APP_BUNDLE_NAME}"
-cp -R "${OUTPUT_APP}" "/Applications/${APP_BUNDLE_NAME}"
-rm -rf "${OUTPUT_APP}"
+echo "==> Installing atomically to ${TARGET_APP}..."
+BACKUP_APP="/Applications/.${APP_BUNDLE_NAME}.old.$$"
+STAGED_TARGET="/Applications/.${APP_BUNDLE_NAME}.new.$$"
+rm -rf "${STAGED_TARGET}" "${BACKUP_APP}"
+cp -R "${OUTPUT_APP}" "${STAGED_TARGET}"
+
+if [[ -d "${TARGET_APP}" ]]; then
+    mv "${TARGET_APP}" "${BACKUP_APP}"
+fi
+mv "${STAGED_TARGET}" "${TARGET_APP}"
+rm -rf "${BACKUP_APP}"
 
 echo "==> VPNGuard.app build and installation completed successfully!"
 echo "    (Auto-start at login is managed via ~/Library/LaunchAgents/com.vpnguard.app.plist inside the app)"
-ls -ld "/Applications/${APP_BUNDLE_NAME}"
+ls -ld "${TARGET_APP}"

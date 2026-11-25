@@ -70,4 +70,31 @@ final class VPNGuardAppTests: XCTestCase {
         XCTAssertEqual(conn.processName, "Claude")
         XCTAssertEqual(conn.destinationDisplay, "api.anthropic.com:443")
     }
+
+    func testSystemStatusDecodesWithAndWithoutPauseUntil() throws {
+        let baseJson = """
+        {
+          "isProtectionOn": false,
+          "pfEnabled": false,
+          "pfRulesCount": 0,
+          "pfBlockedPackets": 0,
+          "xrayRunning": { "running": true, "pid": 123, "gid": "889", "user": "_vpnguard_proxy" },
+          "singboxRunning": { "running": false, "pid": null, "gid": null, "user": null },
+          "utunInterface": null,
+          "exitIp": null,
+          "exitLocation": null,
+          "relayIp": null,
+          "activeServerId": null,
+          "activeServerName": null,
+          "clashApiUrl": "127.0.0.1:9090",
+          "clashApiSecret": "abc"
+        }
+        """
+        let statusWithout = try JSONDecoder().decode(SystemStatus.self, from: Data(baseJson.utf8))
+        XCTAssertNil(statusWithout.pauseUntil)
+
+        let withPauseJson = baseJson.replacingOccurrences(of: "\"clashApiSecret\": \"abc\"", with: "\"clashApiSecret\": \"abc\",\n  \"pauseUntil\": 1800000300")
+        let statusWith = try JSONDecoder().decode(SystemStatus.self, from: Data(withPauseJson.utf8))
+        XCTAssertEqual(statusWith.pauseUntil, 1800000300)
+    }
 }

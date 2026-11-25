@@ -46,6 +46,7 @@ public struct SystemStatus: Codable, Equatable {
     public let activeServerName: String?
     public let clashApiUrl: String?
     public let clashApiSecret: String?
+    public let pauseUntil: TimeInterval?
     
     public static var initial: SystemStatus {
         SystemStatus(
@@ -62,7 +63,8 @@ public struct SystemStatus: Codable, Equatable {
             activeServerId: nil,
             activeServerName: nil,
             clashApiUrl: nil,
-            clashApiSecret: nil
+            clashApiSecret: nil,
+            pauseUntil: nil
         )
     }
 }
