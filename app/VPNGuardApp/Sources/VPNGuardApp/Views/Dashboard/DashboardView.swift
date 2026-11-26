@@ -9,12 +9,12 @@ public struct DashboardView: View {
                 title: "Обзор",
                 subtitle: "Состояние изоляции трафика, демонов и проверка утечек"
             ) {
-                HStack(spacing: 8) {
+                HStack(spacing: VGTokens.Spacing.inlineGap) {
                     Button {
                         Task { await vm.refreshStatus(fast: false) }
                     } label: {
                         Label("Обновить", systemImage: "arrow.clockwise")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(VGTokens.Typography.bodyEmphasis)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.regular)
@@ -23,34 +23,20 @@ public struct DashboardView: View {
                     Button {
                         Task { await vm.toggleProtection() }
                     } label: {
-                        HStack(spacing: 6) {
+                        HStack(spacing: VGPrimitives.Space.s6) {
                             if vm.isTogglingPower {
                                 ProgressView().controlSize(.small)
                             } else {
                                 Image(systemName: "power")
-                                    .font(.system(size: 11, weight: .semibold))
+                                    .font(VGTokens.Typography.captionEmphasis)
                             }
                             Text(vm.isKillSwitchArmed ? "Отключить" : "Включить")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(VGTokens.Typography.bodyEmphasis)
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(
-                            vm.isKillSwitchArmed
-                                ? VGTheme.statusDanger.opacity(0.14)
-                                : VGTheme.statusProtected,
-                            in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                        )
-                        .foregroundStyle(vm.isKillSwitchArmed ? VGTheme.statusDanger : .white)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                                .strokeBorder(
-                                    vm.isKillSwitchArmed ? VGTheme.statusDanger.opacity(0.3) : .clear,
-                                    lineWidth: 0.75
-                                )
-                        )
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderedProminent)
+                    .tint(vm.isKillSwitchArmed ? VGTokens.Colors.statusDanger : VGTokens.Colors.statusProtectedFill)
+                    .controlSize(.regular)
                     .disabled(vm.isTogglingPower)
                 }
             }
@@ -60,20 +46,11 @@ public struct DashboardView: View {
                     heroStatusCard
 
                     if let statusErr = vm.statusError {
-                        VGCard(padding: 12, accentBorder: VGTheme.statusDanger.opacity(0.35)) {
-                            HStack(spacing: 10) {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundStyle(VGTheme.statusDanger)
-                                Text("Ошибка опроса CLI: \(statusErr). Убедитесь, что выполнен `sudo ./install.sh`.")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.primary)
-                                Spacer()
-                                Button("Повторить") {
-                                    Task { await vm.refreshStatus(fast: false) }
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                            }
+                        VGErrorBanner(
+                            message: "Ошибка опроса CLI: \(statusErr). Убедитесь, что выполнен `sudo ./install.sh`.",
+                            retryTitle: "Повторить"
+                        ) {
+                            Task { await vm.refreshStatus(fast: false) }
                         }
                     }
 
@@ -153,27 +130,29 @@ public struct DashboardView: View {
 
     // MARK: - Hero Status Card
     private var heroStatusCard: some View {
-        VGCard(
-            padding: 18,
-            accentBorder: vm.isProtectionActive ? VGTheme.statusProtected.opacity(0.28) : VGTheme.statusWarning.opacity(0.28)
+        let statusTint = vm.isProtectionActive ? VGTokens.Colors.statusProtected : VGTokens.Colors.statusWarning
+        return VGCard(
+            padding: VGTokens.Spacing.cardPadding,
+            accentBorder: statusTint.opacity(0.28)
         ) {
-            VStack(spacing: 14) {
-                HStack(spacing: 16) {
+            VStack(spacing: VGPrimitives.Space.s14) {
+                HStack(spacing: VGTokens.Spacing.cardPadding) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: VGTheme.radiusCard, style: .continuous)
-                            .fill((vm.isProtectionActive ? VGTheme.statusProtected : VGTheme.statusWarning).opacity(0.14))
+                        RoundedRectangle(cornerRadius: VGTokens.Radius.card, style: .continuous)
+                            .fill(statusTint.opacity(VGComponentTokens.Badge.fillOpacity))
                             .frame(width: 48, height: 48)
 
                         Image(systemName: vm.isProtectionActive ? "checkmark.shield.fill" : (vm.isTunnelRecovering ? "exclamationmark.shield.fill" : "shield.slash.fill"))
                             .font(.system(size: 22, weight: .semibold))
-                            .foregroundStyle(vm.isProtectionActive ? VGTheme.statusProtected : VGTheme.statusWarning)
+                            .foregroundStyle(statusTint)
                     }
+                    .accessibilityHidden(true)
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: VGTokens.Spacing.microGap) {
+                        HStack(spacing: VGTokens.Spacing.inlineGap) {
                             Text(vm.isProtectionActive ? "Защита VPNGuard активна" : (vm.isTunnelRecovering ? "PF Kill-Switch активен" : "Защита VPNGuard отключена"))
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(.primary)
+                                .font(VGTokens.Typography.sectionTitle)
+                                .foregroundStyle(VGTokens.Colors.textPrimary)
 
                             VGStatusBadge(
                                 vm.isProtectionActive ? "Активен" : (vm.isTunnelRecovering ? "Восстановление" : "Отключён"),
@@ -189,8 +168,8 @@ public struct DashboardView: View {
                                     ? "PF Kill-Switch активен — туннель восстанавливается. Прямые утечки заблокированы."
                                     : "Сетевой фильтр деактивирован. Прямой доступ разрешён (режим Captive Portal).")
                         )
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                        .font(VGTokens.Typography.body)
+                        .foregroundStyle(VGTokens.Colors.textSecondary)
                     }
 
                     Spacer()
@@ -198,50 +177,76 @@ public struct DashboardView: View {
 
                 Divider().opacity(0.5)
 
-                HStack(spacing: 20) {
-                    summaryMetric(
-                        label: "Сервер",
-                        value: vm.activeServer?.name ?? vm.status.activeServerName ?? "—"
-                    )
-
-                    Divider().frame(height: 22).opacity(0.5)
-
-                    HStack(spacing: 6) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: VGTokens.Spacing.sectionGap) {
                         summaryMetric(
-                            label: "Выходной IP",
-                            value: vm.status.exitIp ?? "—",
+                            label: "Сервер",
+                            value: vm.activeServer?.name ?? vm.status.activeServerName ?? "—"
+                        )
+
+                        Divider().frame(height: 22).opacity(0.5)
+
+                        HStack(spacing: VGPrimitives.Space.s6) {
+                            summaryMetric(
+                                label: "Выходной IP",
+                                value: vm.status.exitIp ?? "—",
+                                monospaced: true
+                            )
+                            if let ip = vm.status.exitIp, !ip.isEmpty {
+                                VGCopyButton(ip, helpText: "Скопировать выходной IP")
+                            }
+                        }
+
+                        Divider().frame(height: 22).opacity(0.5)
+
+                        summaryMetric(
+                            label: "PF Kill-Switch",
+                            value: vm.status.pfEnabled
+                                ? "Активен (\(vm.status.pfBlockedPackets) блок.)"
+                                : "Выключен",
                             monospaced: true
                         )
-                        if let ip = vm.status.exitIp, !ip.isEmpty {
-                            VGCopyButton(ip, helpText: "Скопировать выходной IP")
-                        }
+
+                        Spacer()
                     }
 
-                    Divider().frame(height: 22).opacity(0.5)
-
-                    summaryMetric(
-                        label: "PF Kill-Switch",
-                        value: vm.status.pfEnabled
-                            ? "Активен (\(vm.status.pfBlockedPackets) блок.)"
-                            : "Выключен",
-                        monospaced: true
-                    )
-
-                    Spacer()
+                    VStack(alignment: .leading, spacing: VGTokens.Spacing.inlineGap) {
+                        summaryMetric(
+                            label: "Сервер",
+                            value: vm.activeServer?.name ?? vm.status.activeServerName ?? "—"
+                        )
+                        HStack(spacing: VGPrimitives.Space.s6) {
+                            summaryMetric(
+                                label: "Выходной IP",
+                                value: vm.status.exitIp ?? "—",
+                                monospaced: true
+                            )
+                            if let ip = vm.status.exitIp, !ip.isEmpty {
+                                VGCopyButton(ip, helpText: "Скопировать выходной IP")
+                            }
+                        }
+                        summaryMetric(
+                            label: "PF Kill-Switch",
+                            value: vm.status.pfEnabled
+                                ? "Активен (\(vm.status.pfBlockedPackets) блок.)"
+                                : "Выключен",
+                            monospaced: true
+                        )
+                    }
                 }
             }
         }
     }
 
     private func summaryMetric(label: String, value: String, monospaced: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: VGPrimitives.Space.s2) {
             Text(label)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.secondary)
+                .font(VGTokens.Typography.caption)
+                .foregroundStyle(VGTokens.Colors.textSecondary)
             Text(value)
-                .font(.system(size: 12, weight: .semibold, design: monospaced ? .monospaced : .default))
+                .font(monospaced ? VGTokens.Typography.monoBody.weight(.semibold) : VGTokens.Typography.cardTitle)
                 .monospacedDigit()
-                .foregroundStyle(.primary)
+                .foregroundStyle(VGTokens.Colors.textPrimary)
                 .lineLimit(1)
         }
     }
@@ -255,29 +260,30 @@ public struct DashboardView: View {
         iconTint: Color,
         details: [(String, String)]
     ) -> some View {
-        VGCard(padding: 16) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 10) {
+        VGCard(padding: VGTokens.Spacing.cardPadding) {
+            VStack(alignment: .leading, spacing: VGTokens.Spacing.gridGap) {
+                HStack(spacing: VGPrimitives.Space.s10) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                            .fill(iconTint.opacity(0.14))
+                        RoundedRectangle(cornerRadius: VGTokens.Radius.control, style: .continuous)
+                            .fill(iconTint.opacity(VGComponentTokens.Badge.fillOpacity))
                             .frame(width: 32, height: 32)
                         Image(systemName: icon)
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(VGTokens.Typography.cardTitle)
                             .foregroundStyle(iconTint)
                     }
+                    .accessibilityHidden(true)
 
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: VGPrimitives.Space.s2) {
                         Text(title)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.primary)
+                            .font(VGTokens.Typography.cardTitle)
+                            .foregroundStyle(VGTokens.Colors.textPrimary)
                         Text(subtitle)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
+                            .font(VGTokens.Typography.caption)
+                            .foregroundStyle(VGTokens.Colors.textSecondary)
                             .lineLimit(1)
                     }
 
-                    Spacer(minLength: 8)
+                    Spacer(minLength: VGTokens.Spacing.inlineGap)
 
                     VGStatusBadge(
                         isRunning ? "Активен" : "Отключён",
@@ -288,7 +294,7 @@ public struct DashboardView: View {
 
                 Divider().opacity(0.45)
 
-                VStack(spacing: 7) {
+                VStack(spacing: VGPrimitives.Space.s6) {
                     ForEach(details, id: \.0) { label, val in
                         VGKeyValueRow(label, value: val)
                     }
@@ -301,31 +307,32 @@ public struct DashboardView: View {
 
     // MARK: - Audit Section Shortcut
     private var auditSection: some View {
-        VGCard(padding: 16) {
-            HStack(spacing: 14) {
+        VGCard(padding: VGTokens.Spacing.cardPadding) {
+            HStack(spacing: VGPrimitives.Space.s14) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                        .fill(VGTheme.accentPrimary.opacity(0.14))
+                    RoundedRectangle(cornerRadius: VGTokens.Radius.control, style: .continuous)
+                        .fill(VGTokens.Colors.accentPrimary.opacity(VGComponentTokens.Badge.fillOpacity))
                         .frame(width: 36, height: 36)
                     Image(systemName: "stethoscope")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(VGTheme.accentPrimary)
+                        .font(VGTokens.Typography.sectionTitle)
+                        .foregroundStyle(VGTokens.Colors.accentPrimary)
                 }
+                .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: VGPrimitives.Space.s2) {
                     Text("Аудит утечек и системные логи")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(VGTokens.Typography.cardTitle)
                     if let report = vm.auditReport {
                         Text(report.passed
                              ? "Последняя проверка: все \(report.total) тестов пройдены"
                              : "Последняя проверка: пройдено \(report.passedCount) из \(report.total) тестов")
-                            .font(.system(size: 12))
+                            .font(VGTokens.Typography.body)
                             .monospacedDigit()
-                            .foregroundStyle(report.passed ? VGTheme.statusProtected : VGTheme.statusWarning)
+                            .foregroundStyle(report.passed ? VGTokens.Colors.statusProtected : VGTokens.Colors.statusWarning)
                     } else {
                         Text("12-точечная проверка PF, GID 888/889/890, DNS, utun99 и просмотр логов")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
+                            .font(VGTokens.Typography.body)
+                            .foregroundStyle(VGTokens.Colors.textSecondary)
                     }
                 }
 
@@ -340,23 +347,21 @@ public struct DashboardView: View {
                     vm.requestedNavigationSection = .diagnostics
                     Task { await vm.runSecurityAudit() }
                 } label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: VGPrimitives.Space.s6) {
                         if vm.isRunningAudit {
                             ProgressView().controlSize(.small)
                             Text("Аудит…")
                         } else {
                             Image(systemName: "play.fill")
-                                .font(.system(size: 10))
+                                .font(VGTokens.Typography.caption)
                             Text("Проверить утечки")
                         }
                     }
-                    .font(.system(size: 12, weight: .semibold))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(VGTheme.accentPrimary, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
-                    .foregroundStyle(.white)
+                    .font(VGTokens.Typography.bodyEmphasis)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderedProminent)
+                .tint(VGTokens.Colors.accentPrimary)
+                .controlSize(.regular)
                 .disabled(vm.isRunningAudit)
             }
         }

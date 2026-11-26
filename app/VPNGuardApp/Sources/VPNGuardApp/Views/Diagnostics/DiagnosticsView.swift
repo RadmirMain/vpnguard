@@ -169,23 +169,21 @@ public struct DiagnosticsView: View {
                     Button {
                         Task { await vm.runSecurityAudit() }
                     } label: {
-                        HStack(spacing: 6) {
+                        HStack(spacing: VGPrimitives.Space.s6) {
                             if vm.isRunningAudit {
                                 ProgressView().controlSize(.small)
                                 Text("Выполняется…")
                             } else {
                                 Image(systemName: "play.fill")
-                                    .font(.system(size: 10))
+                                    .font(VGTokens.Typography.caption)
                                 Text("Проверить утечки")
                             }
                         }
-                        .font(.system(size: 12, weight: .semibold))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 7)
-                        .background(VGTheme.accentPrimary, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
-                        .foregroundStyle(.white)
+                        .font(VGTokens.Typography.bodyEmphasis)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderedProminent)
+                    .tint(VGTokens.Colors.accentPrimary)
+                    .controlSize(.regular)
                     .disabled(vm.isRunningAudit)
                 }
 
@@ -306,17 +304,35 @@ public struct DiagnosticsView: View {
                     .disabled(vm.isLoadingDiagnostics)
                 }
 
-                HStack(spacing: 10) {
-                    Picker("", selection: $selectedSource) {
-                        ForEach(LogSource.allCases) { src in
-                            Text(src.rawValue).tag(src)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: VGTokens.Spacing.inlineGap) {
+                        Picker("", selection: $selectedSource) {
+                            ForEach(LogSource.allCases) { src in
+                                Text(src.rawValue).tag(src)
+                            }
                         }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .fixedSize()
 
-                    VGSearchField("Фильтр строк…", text: $logSearchQuery)
-                        .frame(width: 200)
+                        Spacer(minLength: VGTokens.Spacing.inlineGap)
+
+                        VGSearchField("Фильтр строк…", text: $logSearchQuery)
+                            .frame(minWidth: 160, maxWidth: 220)
+                    }
+
+                    HStack(spacing: VGTokens.Spacing.inlineGap) {
+                        Picker("Источник логов", selection: $selectedSource) {
+                            ForEach(LogSource.allCases) { src in
+                                Text(src.rawValue).tag(src)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+
+                        VGSearchField("Фильтр строк…", text: $logSearchQuery)
+                    }
                 }
 
                 // Clean ANSI-stripped & highlighted log viewer (rendered asynchronously off body)

@@ -26,12 +26,12 @@ public struct AppPickerSheet: View {
     public var body: some View {
         VStack(spacing: 0) {
             HStack {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: VGPrimitives.Space.s2) {
                     Text("Добавить приложение")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(VGTokens.Typography.sheetTitle)
                     Text("Выберите программу для маршрутизации через VPNGuard")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                        .font(VGTokens.Typography.caption)
+                        .foregroundStyle(VGTokens.Colors.textSecondary)
                 }
 
                 Spacer()
@@ -41,26 +41,18 @@ public struct AppPickerSheet: View {
                 }
                 .buttonStyle(.bordered)
             }
-            .padding(VGTheme.sheetPadding)
+            .padding(VGTokens.Spacing.sheetPadding)
 
             Divider().opacity(0.6)
 
             VGSearchField("Поиск среди установленных приложений…", text: $searchQuery)
-                .padding(.horizontal, VGTheme.sheetPadding)
-                .padding(.vertical, 12)
+                .padding(.horizontal, VGTokens.Spacing.sheetPadding)
+                .padding(.vertical, VGTokens.Spacing.gridGap)
 
             Divider().opacity(0.5)
 
             if isLoading {
-                VStack(spacing: 10) {
-                    Spacer()
-                    ProgressView()
-                    Text("Поиск установленных приложений…")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VGLoadingStateView("Поиск установленных приложений…")
             } else if filteredApps.isEmpty {
                 VGEmptyStateView(
                     icon: "app.dashed",
@@ -69,27 +61,27 @@ public struct AppPickerSheet: View {
                 )
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 6) {
+                    LazyVStack(spacing: VGPrimitives.Space.s6) {
                         ForEach(filteredApps) { app in
                             let isAlreadyAdded = vm.rules.apps.contains(where: { $0.bundlePath == app.path })
 
-                            HStack(spacing: 12) {
+                            HStack(spacing: VGTokens.Spacing.gridGap) {
                                 Image(nsImage: AppIconCache.shared.iconOrDefault(forAppPath: app.path))
                                     .resizable()
                                     .frame(width: 28, height: 28)
 
-                                VStack(alignment: .leading, spacing: 2) {
+                                VStack(alignment: .leading, spacing: VGPrimitives.Space.s2) {
                                     Text(app.name)
-                                        .font(.system(size: 13, weight: .semibold))
+                                        .font(VGTokens.Typography.cardTitle)
                                         .lineLimit(1)
                                     Text(app.path)
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(.secondary)
+                                        .font(VGTokens.Typography.caption)
+                                        .foregroundStyle(VGTokens.Colors.textSecondary)
                                         .lineLimit(1)
                                         .truncationMode(.middle)
                                 }
 
-                                Spacer(minLength: 10)
+                                Spacer(minLength: VGPrimitives.Space.s10)
 
                                 if isAlreadyAdded {
                                     VGStatusBadge("Добавлено", tone: .neutral)
@@ -102,13 +94,13 @@ public struct AppPickerSheet: View {
                                     .controlSize(.small)
                                 }
                             }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .vgHoverRow(cornerRadius: VGTheme.radiusControl)
+                            .padding(.horizontal, VGComponentTokens.Row.horizontalPadding)
+                            .padding(.vertical, VGComponentTokens.Row.verticalPadding)
+                            .vgHoverRow(cornerRadius: VGComponentTokens.Row.cornerRadius)
                         }
                     }
-                    .padding(.horizontal, VGTheme.sheetPadding)
-                    .padding(.vertical, 12)
+                    .padding(.horizontal, VGTokens.Spacing.sheetPadding)
+                    .padding(.vertical, VGTokens.Spacing.gridGap)
                 }
             }
 
@@ -121,11 +113,11 @@ public struct AppPickerSheet: View {
                 }
                 .keyboardShortcut(.cancelAction)
             }
-            .padding(.horizontal, VGTheme.sheetPadding)
-            .padding(.vertical, 12)
+            .padding(.horizontal, VGTokens.Spacing.sheetPadding)
+            .padding(.vertical, VGTokens.Spacing.gridGap)
         }
         .frame(width: 580, height: 480)
-        .background(VGTheme.backgroundContent)
+        .background(VGTokens.Colors.backgroundContent)
         .task {
             isLoading = true
             installedApps = await AppDiscoveryService.shared.scanInstalledApps()

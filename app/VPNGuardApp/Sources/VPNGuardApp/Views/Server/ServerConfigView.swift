@@ -55,13 +55,11 @@ public struct ServerConfigView: View {
                         showingAddSheet = true
                     } label: {
                         Label("Добавить сервер", systemImage: "plus")
-                            .font(.system(size: 12, weight: .semibold))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(VGTheme.accentPrimary, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
-                            .foregroundStyle(.white)
+                            .font(VGTokens.Typography.bodyEmphasis)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderedProminent)
+                    .tint(VGTokens.Colors.accentPrimary)
+                    .controlSize(.regular)
                 }
             }
 
@@ -71,8 +69,12 @@ public struct ServerConfigView: View {
                     autoFailoverSection
 
                     // Unified Server Profiles List
-                    if vm.servers.isEmpty {
-                        VGCard(padding: 20) {
+                    if vm.isLoadingServers && vm.servers.isEmpty {
+                        VGCard(padding: VGTokens.Spacing.cardPadding) {
+                            VGLoadingStateView("Загрузка профилей серверов…")
+                        }
+                    } else if vm.servers.isEmpty {
+                        VGCard(padding: VGTokens.Spacing.cardPadding) {
                             VGEmptyStateView(
                                 icon: "server.rack",
                                 title: "Нет сохранённых серверов",
@@ -173,39 +175,42 @@ public struct ServerConfigView: View {
 
     // MARK: - Unified Server Card
     private func serverCard(server: ServerProfile) -> some View {
-        VGCard(
-            padding: 16,
-            accentBorder: server.isActive ? VGTheme.statusProtected.opacity(0.4) : nil
+        let iconTint = server.isActive ? VGTokens.Colors.statusProtected : VGTokens.Colors.accentPrimary
+        return VGCard(
+            padding: VGTokens.Spacing.cardPadding,
+            accentBorder: server.isActive ? VGTokens.Colors.statusProtected.opacity(0.4) : nil
         ) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: VGTokens.Spacing.gridGap) {
+                HStack(alignment: .center, spacing: VGTokens.Spacing.gridGap) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                            .fill((server.isActive ? VGTheme.statusProtected : VGTheme.accentPrimary).opacity(0.14))
+                        RoundedRectangle(cornerRadius: VGTokens.Radius.control, style: .continuous)
+                            .fill(iconTint.opacity(VGComponentTokens.Badge.fillOpacity))
                             .frame(width: 36, height: 36)
-                        if let flag = serverFlag(for: server) {
-                            Text(flag)
-                                .font(.system(size: 18))
+                        if let code = serverCountryCode(for: server) {
+                            Text(code)
+                                .font(VGTokens.Typography.monoCaption.weight(.bold))
+                                .foregroundStyle(iconTint)
                         } else {
                             Image(systemName: server.isActive ? "checkmark.shield.fill" : "server.rack")
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(server.isActive ? VGTheme.statusProtected : VGTheme.accentPrimary)
+                                .font(VGTokens.Typography.cardTitle)
+                                .foregroundStyle(iconTint)
                         }
                     }
+                    .accessibilityHidden(true)
 
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: VGPrimitives.Space.s2) {
                         Text(server.name)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.primary)
+                            .font(VGTokens.Typography.cardTitle)
+                            .foregroundStyle(VGTokens.Colors.textPrimary)
                             .lineLimit(1)
 
                         Text("\(server.host):\(server.port)")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .font(VGTokens.Typography.monoCaption.weight(.medium))
                             .monospacedDigit()
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(VGTokens.Colors.textSecondary)
                     }
 
-                    Spacer(minLength: 12)
+                    Spacer(minLength: VGTokens.Spacing.gridGap)
 
                     if let ping = vm.serverLatencies[server.id] {
                         latencyBadge(for: ping)
@@ -214,26 +219,24 @@ public struct ServerConfigView: View {
                     if server.isActive {
                         VGStatusBadge("Активен", tone: .protected, showDot: true)
                     } else {
-                        HStack(spacing: 8) {
+                        HStack(spacing: VGTokens.Spacing.inlineGap) {
                             Button {
                                 Task { await vm.activateServer(id: server.id) }
                             } label: {
-                                HStack(spacing: 5) {
+                                HStack(spacing: VGPrimitives.Space.s4) {
                                     if vm.activatingServerId == server.id {
                                         ProgressView().controlSize(.mini)
                                     } else {
                                         Image(systemName: "bolt.fill")
-                                            .font(.system(size: 10))
+                                            .font(VGTokens.Typography.caption)
                                     }
                                     Text("Подключить")
+                                        .font(VGTokens.Typography.bodyEmphasis)
                                 }
-                                .font(.system(size: 12, weight: .semibold))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(VGTheme.accentPrimary, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
-                                .foregroundStyle(.white)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.borderedProminent)
+                            .tint(VGTokens.Colors.accentPrimary)
+                            .controlSize(.regular)
                             .disabled(vm.activatingServerId != nil)
 
                             Button {
@@ -241,33 +244,22 @@ public struct ServerConfigView: View {
                                 showingDeleteConfirmation = true
                             } label: {
                                 Image(systemName: "trash")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 28, height: 28)
-                                    .background(VGTheme.surfaceLevel2, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
+                                    .font(VGTokens.Typography.body)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(VGIconButtonStyle(isDestructive: true))
                             .help("Удалить профиль сервера")
+                            .accessibilityLabel("Удалить сервер \(server.name)")
                         }
                     }
                 }
 
                 Divider().opacity(0.45)
 
-                HStack(spacing: 6) {
-                    VGStatusBadge("VLESS", tone: .neutral)
-                    VGStatusBadge(VGFormatters.formatProtocol(server.transport), tone: .neutral)
-                    VGStatusBadge(VGFormatters.formatProtocol(server.security), tone: .neutral)
-
-                    if let flow = server.flow, !flow.isEmpty {
-                        VGStatusBadge(VGFormatters.formatProtocol(flow), tone: .neutral)
-                    }
-                    if let sni = server.sni, !sni.isEmpty {
-                        VGStatusBadge("SNI: \(sni)", tone: .neutral)
-                    }
-
-                    Spacer()
-                }
+                Text(serverMetadataLine(for: server))
+                    .font(VGTokens.Typography.monoCaption)
+                    .foregroundStyle(VGTokens.Colors.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
         }
         .contextMenu {
@@ -309,20 +301,27 @@ public struct ServerConfigView: View {
         }
     }
 
-    private func startsWithFlagEmoji(_ text: String) -> Bool {
-        guard let firstScalar = text.unicodeScalars.first else { return false }
-        return (0x1F1E6...0x1F1FF).contains(firstScalar.value) || firstScalar.value == 0x1F310
+    private func serverMetadataLine(for server: ServerProfile) -> String {
+        var parts = [
+            "VLESS",
+            VGFormatters.formatProtocol(server.transport),
+            VGFormatters.formatProtocol(server.security)
+        ]
+        if let flow = server.flow, !flow.isEmpty {
+            parts.append(VGFormatters.formatProtocol(flow))
+        }
+        if let sni = server.sni, !sni.isEmpty {
+            parts.append("SNI: \(sni)")
+        }
+        return parts.joined(separator: " · ")
     }
 
-    private func serverFlag(for server: ServerProfile) -> String? {
-        if startsWithFlagEmoji(server.name) {
-            return nil
-        }
+    private func serverCountryCode(for server: ServerProfile) -> String? {
         let text = server.name.lowercased()
-        if text.contains("индия") || text.contains("india") { return "🇮🇳" }
-        if text.contains("россия") || text.contains("russia") { return "🇷🇺" }
-        if text.contains("германия") || text.contains("germany") { return "🇩🇪" }
-        if text.contains("сша") || text.contains("usa") || text.contains("united states") { return "🇺🇸" }
+        if text.contains("индия") || text.contains("india") { return "IN" }
+        if text.contains("россия") || text.contains("russia") { return "RU" }
+        if text.contains("германия") || text.contains("germany") { return "DE" }
+        if text.contains("сша") || text.contains("usa") || text.contains("united states") { return "US" }
         return nil
     }
 }
@@ -347,7 +346,9 @@ private struct AddServerSheet: View {
 
     private var parsedPreview: Result<VlessParsedPreview, VlessParseError>? {
         let trimmed = vlessInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return nil }
+        guard !trimmed.isEmpty else { return nil }
+        // Avoid premature error feedback while the user is still typing the scheme prefix
+        guard trimmed.contains("://") || trimmed.count >= 10 else { return nil }
         return VlessPreviewParser.parse(uri: trimmed)
     }
 
@@ -361,10 +362,10 @@ private struct AddServerSheet: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Добавить сервер")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(VGTokens.Typography.sheetTitle)
                     Text("Импорт профиля VLESS или ручная конфигурация Xray")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                        .font(VGTokens.Typography.caption)
+                        .foregroundStyle(VGTokens.Colors.textSecondary)
                 }
 
                 Spacer()

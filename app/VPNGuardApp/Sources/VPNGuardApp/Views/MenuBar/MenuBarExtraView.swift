@@ -51,9 +51,9 @@ public struct MenuBarExtraView: View {
             // MARK: - Bottom Actions
             bottomActions
         }
-        .padding(14)
-        .frame(width: 356)
-        .background(VGTheme.backgroundContent)
+        .padding(VGComponentTokens.Popover.padding)
+        .frame(width: VGComponentTokens.Popover.width)
+        .background(VGTokens.Colors.backgroundContent)
         .background(MenuBarWindowAnchor())
         .onAppear {
             vm.refreshBrowserAvailability()
@@ -83,20 +83,21 @@ public struct MenuBarExtraView: View {
                     NSPasteboard.general.setString(message, forType: .string)
                 } label: {
                     Image(systemName: "doc.on.doc")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .font(VGTokens.Typography.caption)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(VGIconButtonStyle())
                 .help("Скопировать текст ошибки")
+                .accessibilityLabel("Скопировать текст ошибки")
 
                 Button {
                     vm.dismissToast()
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .font(VGTokens.Typography.caption)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(VGIconButtonStyle())
+                .help("Закрыть уведомление")
+                .accessibilityLabel("Закрыть уведомление об ошибке")
             }
         }
     }
@@ -231,32 +232,28 @@ public struct MenuBarExtraView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                HStack(spacing: 8) {
+                HStack(spacing: VGTokens.Spacing.inlineGap) {
                     Button {
                         Task { await vm.resumeFromPauseNow() }
                     } label: {
                         Text("Вернуть защиту")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(VGTokens.Typography.captionEmphasis)
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 5)
-                            .background(VGTheme.statusProtected.opacity(0.16), in: RoundedRectangle(cornerRadius: VGTheme.radiusBadge, style: .continuous))
-                            .foregroundStyle(VGTheme.statusProtected)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderedProminent)
+                    .tint(VGTokens.Colors.statusProtectedFill)
+                    .controlSize(.small)
                     .disabled(vm.isTogglingPause)
 
                     Button {
                         Task { await vm.pauseForWifi(seconds: 900) }
                     } label: {
                         Text("15 мин")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(VGTokens.Typography.captionEmphasis)
                             .monospacedDigit()
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(VGTheme.surfaceLevel2, in: RoundedRectangle(cornerRadius: VGTheme.radiusBadge, style: .continuous))
-                            .foregroundStyle(.secondary)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                     .disabled(vm.isTogglingPause)
                 }
             }
@@ -280,18 +277,13 @@ public struct MenuBarExtraView: View {
                     .foregroundStyle(.primary)
                 Spacer()
                 Text("5 мин")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                    .font(VGTokens.Typography.caption)
+                    .foregroundStyle(VGTokens.Colors.textSecondary)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(VGTheme.surfaceLevel1, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                    .strokeBorder(VGTheme.borderSubtle, lineWidth: 0.75)
-            )
+            .padding(.horizontal, VGComponentTokens.Row.horizontalPadding)
+            .padding(.vertical, VGComponentTokens.Row.verticalPadding)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(VGSurfaceButtonStyle())
         .disabled(vm.isTogglingPause || vm.isTogglingPower)
     }
 
@@ -478,18 +470,14 @@ public struct MenuBarExtraView: View {
                         .foregroundStyle(canLaunch ? .primary : .secondary)
                     Spacer()
                     Image(systemName: "arrow.up.right")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+                        .font(VGTokens.Typography.caption)
+                        .foregroundStyle(VGTokens.Colors.textSecondary)
+                        .accessibilityHidden(true)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(VGTheme.surfaceLevel1, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                        .strokeBorder(VGTheme.borderSubtle, lineWidth: 0.75)
-                )
+                .padding(.horizontal, VGComponentTokens.Row.horizontalPadding)
+                .padding(.vertical, VGComponentTokens.Row.verticalPadding)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(VGSurfaceButtonStyle())
             .disabled(!canLaunch)
             .help(
                 !vm.hasSupportedBrowser
@@ -538,17 +526,12 @@ public struct MenuBarExtraView: View {
                 NSApp.terminate(nil)
             } label: {
                 Image(systemName: "power")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .font(VGTokens.Typography.captionEmphasis)
                     .frame(width: 30, height: 28)
-                    .background(VGTheme.surfaceLevel1, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                            .strokeBorder(VGTheme.borderSubtle, lineWidth: 0.75)
-                    )
             }
-            .buttonStyle(.plain)
+            .buttonStyle(VGSurfaceButtonStyle())
             .help("Выход из VPNGuard")
+            .accessibilityLabel("Выйти из VPNGuard")
         }
     }
 }
@@ -557,31 +540,22 @@ private struct MenuBarActionButton: View {
     let title: String
     let icon: String
     let action: () -> Void
-    @State private var isHovered = false
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: VGPrimitives.Space.s4) {
                 Image(systemName: icon)
-                    .font(.system(size: 11))
+                    .font(VGTokens.Typography.caption)
+                    .accessibilityHidden(true)
                 Text(title)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(VGTokens.Typography.captionEmphasis)
                     .lineLimit(1)
             }
-            .foregroundStyle(.primary)
+            .foregroundStyle(VGTokens.Colors.textPrimary)
             .frame(maxWidth: .infinity)
             .frame(height: 28)
-            .background(
-                RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                    .fill(isHovered ? VGTheme.surfaceHover : VGTheme.surfaceLevel1)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                    .strokeBorder(VGTheme.borderSubtle, lineWidth: 0.75)
-            )
         }
-        .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
+        .buttonStyle(VGSurfaceButtonStyle())
     }
 }
 

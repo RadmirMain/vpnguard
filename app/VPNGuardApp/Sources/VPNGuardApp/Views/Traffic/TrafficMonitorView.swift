@@ -19,6 +19,7 @@ private struct GroupedTrafficEntry: Identifiable {
 public struct TrafficMonitorView: View {
     @ObservedObject var vm: VPNGuardViewModel
     @ObservedObject private var monitor = TrafficMonitorService.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var searchText: String = ""
     @State private var selectedFilter: FilterRoute = .all
@@ -166,29 +167,22 @@ public struct TrafficMonitorView: View {
                         .fixedSize()
 
                         Button {
-                            withAnimation(.snappy(duration: 0.2)) {
+                            withAnimation(VGTokens.Motion.snappy(reduceMotion: reduceMotion)) {
                                 groupByProcessAndHost.toggle()
                             }
                         } label: {
-                            HStack(spacing: 5) {
+                            HStack(spacing: VGPrimitives.Space.s6) {
                                 Image(systemName: "square.stack.3d.up")
-                                    .font(.system(size: 11))
+                                    .font(VGTokens.Typography.caption)
+                                    .accessibilityHidden(true)
                                 Text("Группировать")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(VGTokens.Typography.captionEmphasis)
                             }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .foregroundStyle(groupByProcessAndHost ? .primary : .secondary)
-                            .background(
-                                RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                                    .fill(groupByProcessAndHost ? VGTheme.sidebarSelection : VGTheme.surfaceLevel1)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                                    .strokeBorder(VGTheme.borderSubtle, lineWidth: 0.75)
-                            )
+                            .foregroundStyle(groupByProcessAndHost ? VGTokens.Colors.textPrimary : VGTokens.Colors.textSecondary)
+                            .padding(.horizontal, VGPrimitives.Space.s10)
+                            .padding(.vertical, VGPrimitives.Space.s6)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(VGSurfaceButtonStyle(isHighlighted: groupByProcessAndHost, highlightTint: VGTokens.Colors.accentPrimary))
                         .help("Группировать повторяющиеся потоки по приложению и домену")
                     }
 
@@ -270,7 +264,7 @@ public struct TrafficMonitorView: View {
                 metricCard(
                     title: "Загрузка",
                     icon: "arrow.down.circle.fill",
-                    tint: VGTheme.accentPrimary,
+                    tint: VGTokens.Colors.accentPrimary,
                     value: VGFormatters.formatSpeed(monitor.downloadSpeed),
                     subtitle: "Всего: \(VGFormatters.formatBytes(monitor.downloadTotal))"
                 )
@@ -278,7 +272,7 @@ public struct TrafficMonitorView: View {
                 metricCard(
                     title: "Отдача",
                     icon: "arrow.up.circle.fill",
-                    tint: Color.indigo,
+                    tint: VGTokens.Colors.accentSecondary,
                     value: VGFormatters.formatSpeed(monitor.uploadSpeed),
                     subtitle: "Всего: \(VGFormatters.formatBytes(monitor.uploadTotal))"
                 )
@@ -286,7 +280,7 @@ public struct TrafficMonitorView: View {
                 metricCard(
                     title: "Соединения",
                     icon: "network",
-                    tint: VGTheme.statusProtected,
+                    tint: VGTokens.Colors.statusProtected,
                     value: "\(monitor.connections.count)",
                     subtitle: "Отфильтровано: \(cachedFilteredConnections.count)"
                 )
@@ -340,8 +334,19 @@ public struct TrafficMonitorView: View {
                 }
             }
 
-            if cachedFilteredConnections.isEmpty {
-                VGCard(padding: 20) {
+            if !monitor.isConnected && monitor.connections.isEmpty && monitor.lastError == nil {
+                VGCard(padding: VGTokens.Spacing.cardPadding) {
+                    VGLoadingStateView("Подключение к Clash API (sing-box)…")
+                }
+            } else if let err = monitor.lastError, monitor.connections.isEmpty {
+                VGErrorBanner(
+                    message: "Ошибка подключения к Clash API: \(err)",
+                    retryTitle: "Повторить"
+                ) {
+                    monitor.startMonitoring()
+                }
+            } else if cachedFilteredConnections.isEmpty {
+                VGCard(padding: VGTokens.Spacing.cardPadding) {
                     VGEmptyStateView(
                         icon: "network.slash",
                         title: searchText.isEmpty ? "Нет активных соединений" : "Ничего не найдено",
@@ -351,14 +356,22 @@ public struct TrafficMonitorView: View {
                     )
                 }
             } else {
-                LazyVStack(spacing: 6) {
-                    if groupByProcessAndHost {
-                        ForEach(cachedGroupedEntries) { entry in
-                            groupedConnectionRow(entry)
-                        }
-                    } else {
-                        ForEach(cachedFilteredConnections) { conn in
-                            connectionRow(conn)
+                VGCard(padding: 0) {
+                    LazyVStack(spacing: 0) {
+                        if groupByProcessAndHost {
+                            ForEach(Array(cachedGroupedEntries.enumerated()), id: \.element.id) { index, entry in
+                                groupedConnectionRow(entry)
+                                if index < cachedGroupedEntries.count - 1 {
+                                    Divider().opacity(0.45)
+                                }
+                            }
+                        } else {
+                            ForEach(Array(cachedFilteredConnections.enumerated()), id: \.element.id) { index, conn in
+                                connectionRow(conn)
+                                if index < cachedFilteredConnections.count - 1 {
+                                    Divider().opacity(0.45)
+                                }
+                            }
                         }
                     }
                 }
@@ -391,12 +404,12 @@ public struct TrafficMonitorView: View {
 
                         if entry.connectionCount > 1 {
                             Text("×\(entry.connectionCount)")
-                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .font(VGTokens.Typography.badge.monospaced())
                                 .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 5)
+                                .foregroundStyle(VGTokens.Colors.textSecondary)
+                                .padding(.horizontal, VGPrimitives.Space.s4)
                                 .padding(.vertical, 1)
-                                .background(VGTheme.surfaceLevel2, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                .background(VGTokens.Colors.surfaceLevel2, in: RoundedRectangle(cornerRadius: VGTokens.Radius.mini, style: .continuous))
                         }
                     }
 
@@ -462,6 +475,17 @@ public struct TrafficMonitorView: View {
                 hasPath: hasPath
             )
 
+            // Inspect route (keyboard & VoiceOver accessible)
+            Button {
+                inspectedConnection = entry.sampleConnection
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(VGTokens.Typography.body)
+            }
+            .buttonStyle(VGIconButtonStyle())
+            .help("Инспектор маршрута (Explain)")
+            .accessibilityLabel("Инспектор маршрута для \(entry.processName)")
+
             // Close group connections in parallel
             Button {
                 let ids = entry.connectionIds
@@ -489,19 +513,17 @@ public struct TrafficMonitorView: View {
                 }
             } label: {
                 Image(systemName: "xmark.circle")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
+                    .font(VGTokens.Typography.body)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(VGIconButtonStyle(isDestructive: true))
             .help("Разорвать все соединения этой группы")
+            .accessibilityLabel("Разорвать все соединения \(entry.processName) к \(entry.destinationHost)")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .vgHoverRow(cornerRadius: VGTheme.radiusControl)
-        .contentShape(Rectangle())
-        .onTapGesture {
+        .padding(.horizontal, VGComponentTokens.Row.horizontalPadding)
+        .padding(.vertical, VGComponentTokens.Row.verticalPadding)
+        .vgHoverRow(cornerRadius: 0)
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: "Открыть инспектор маршрута") {
             inspectedConnection = entry.sampleConnection
         }
         .contextMenu {
@@ -551,11 +573,11 @@ public struct TrafficMonitorView: View {
 
                 HStack(spacing: 6) {
                     Text((conn.metadata.network ?? "TCP").uppercased())
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
+                        .font(VGTokens.Typography.badge)
+                        .foregroundStyle(VGTokens.Colors.textSecondary)
+                        .padding(.horizontal, VGPrimitives.Space.s4)
                         .padding(.vertical, 1)
-                        .background(VGTheme.surfaceLevel2, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        .background(VGTokens.Colors.surfaceLevel2, in: RoundedRectangle(cornerRadius: VGTokens.Radius.mini, style: .continuous))
 
                     if let ip = conn.metadata.destinationIP, ip != conn.metadata.host {
                         Text(ip)
@@ -602,22 +624,30 @@ public struct TrafficMonitorView: View {
                 .frame(width: 48, alignment: .trailing)
 
             Button {
+                inspectedConnection = conn
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(VGTokens.Typography.body)
+            }
+            .buttonStyle(VGIconButtonStyle())
+            .help("Инспектор маршрута (Explain)")
+            .accessibilityLabel("Инспектор маршрута для \(conn.processName)")
+
+            Button {
                 connectionToClose = conn
             } label: {
                 Image(systemName: "xmark.circle")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
+                    .font(VGTokens.Typography.body)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(VGIconButtonStyle(isDestructive: true))
             .help("Разорвать это соединение")
+            .accessibilityLabel("Разорвать соединение \(conn.processName) с \(conn.destinationDisplay)")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .vgHoverRow(cornerRadius: VGTheme.radiusControl)
-        .contentShape(Rectangle())
-        .onTapGesture {
+        .padding(.horizontal, VGComponentTokens.Row.horizontalPadding)
+        .padding(.vertical, VGComponentTokens.Row.verticalPadding)
+        .vgHoverRow(cornerRadius: 0)
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: "Открыть инспектор маршрута") {
             inspectedConnection = conn
         }
         .contextMenu {
@@ -655,18 +685,19 @@ public struct TrafficMonitorView: View {
                     }
                 } label: {
                     Text("VPN")
-                        .font(.system(size: 10, weight: isProxy ? .semibold : .medium))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                        .font(VGTokens.Typography.badge)
+                        .padding(.horizontal, VGPrimitives.Space.s8)
+                        .padding(.vertical, VGPrimitives.Space.s4)
                         .background(
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .fill(isProxy ? VGTheme.accentPrimary.opacity(0.22) : .clear)
+                            RoundedRectangle(cornerRadius: VGTokens.Radius.mini, style: .continuous)
+                                .fill(isProxy ? VGTokens.Colors.accentPrimary.opacity(0.22) : .clear)
                         )
-                        .foregroundStyle(isProxy ? VGTheme.accentPrimary : .secondary)
+                        .foregroundStyle(isProxy ? VGTokens.Colors.accentPrimary : VGTokens.Colors.textSecondary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .disabled(vm.isApplyingRules)
                 .help(isProxy ? "Маршрут: через VPN" : (hasDomain ? "Переключить \(host) на VPN" : "Переключить процесс на VPN"))
+                .accessibilityLabel(hasDomain ? "Направить \(host) через VPN" : "Направить процесс через VPN")
 
                 Button {
                     guard isProxy else { return }
@@ -679,18 +710,19 @@ public struct TrafficMonitorView: View {
                     }
                 } label: {
                     Text("Direct")
-                        .font(.system(size: 10, weight: !isProxy ? .semibold : .medium))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                        .font(VGTokens.Typography.badge)
+                        .padding(.horizontal, VGPrimitives.Space.s8)
+                        .padding(.vertical, VGPrimitives.Space.s4)
                         .background(
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .fill(!isProxy ? VGTheme.statusProtected.opacity(0.22) : .clear)
+                            RoundedRectangle(cornerRadius: VGTokens.Radius.mini, style: .continuous)
+                                .fill(!isProxy ? VGTokens.Colors.statusProtected.opacity(0.22) : .clear)
                         )
-                        .foregroundStyle(!isProxy ? VGTheme.statusProtected : .secondary)
+                        .foregroundStyle(!isProxy ? VGTokens.Colors.statusProtected : VGTokens.Colors.textSecondary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .disabled(vm.isApplyingRules)
                 .help(!isProxy ? "Маршрут: напрямую (Direct)" : (hasDomain ? "Переключить \(host) на Direct" : "Переключить процесс на Direct"))
+                .accessibilityLabel(hasDomain ? "Направить \(host) напрямую" : "Направить процесс напрямую")
             }
             .padding(2)
             .background(VGTheme.surfaceLevel2, in: RoundedRectangle(cornerRadius: VGTheme.radiusBadge, style: .continuous))

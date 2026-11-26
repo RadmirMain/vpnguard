@@ -1,61 +1,40 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Theme Tokens
+// MARK: - Theme Tokens (Compatibility Proxy -> VGTokens)
+/// Compatibility proxy over `VGTokens` so existing views automatically inherit
+/// adaptive Light/Dark Aqua colors and unified spacing/radius tokens.
 public enum VGTheme {
-    // MARK: Adaptive Surfaces (Dark Mode native)
-    public static let backgroundContent = Color(nsColor: .windowBackgroundColor)
-
-    public static let surfaceLevel1 = Color(nsColor: NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor.white.withAlphaComponent(0.045)
-            : NSColor.black.withAlphaComponent(0.03)
-    })
-
-    public static let surfaceLevel2 = Color(nsColor: NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor.white.withAlphaComponent(0.06)
-            : NSColor.black.withAlphaComponent(0.045)
-    })
-
-    public static let surfaceHover = Color(nsColor: NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor.white.withAlphaComponent(0.09)
-            : NSColor.black.withAlphaComponent(0.075)
-    })
-
-    public static let sidebarSelection = Color(nsColor: NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor.white.withAlphaComponent(0.10)
-            : NSColor.black.withAlphaComponent(0.08)
-    })
-
-    public static let borderSubtle = Color(nsColor: NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor.white.withAlphaComponent(0.08)
-            : NSColor.black.withAlphaComponent(0.08)
-    })
+    // MARK: Adaptive Surfaces
+    public static var backgroundContent: Color { VGTokens.Colors.backgroundContent }
+    public static var surfaceLevel1: Color { VGTokens.Colors.surfaceLevel1 }
+    public static var surfaceLevel2: Color { VGTokens.Colors.surfaceLevel2 }
+    public static var surfaceHover: Color { VGTokens.Colors.surfaceHover }
+    public static var sidebarSelection: Color { VGTokens.Colors.sidebarSelection }
+    public static var borderSubtle: Color { VGTokens.Colors.borderSubtle }
 
     // MARK: Semantic Colors
     /// Muted emerald for active protection, PASS, Direct
-    public static let statusProtected = Color(red: 0.20, green: 0.78, blue: 0.55)
+    public static var statusProtected: Color { VGTokens.Colors.statusProtected }
+    /// High-contrast emerald fill for buttons with white foreground text
+    public static var statusProtectedFill: Color { VGTokens.Colors.statusProtectedFill }
     /// Amber for pauses, warnings, Touch ID prompts
-    public static let statusWarning = Color(red: 0.94, green: 0.65, blue: 0.18)
+    public static var statusWarning: Color { VGTokens.Colors.statusWarning }
     /// Muted red for disconnect, block, FAIL, delete
-    public static let statusDanger = Color(red: 0.90, green: 0.34, blue: 0.34)
+    public static var statusDanger: Color { VGTokens.Colors.statusDanger }
     /// Primary accent for primary CTAs and interactive controls
-    public static let accentPrimary = Color(red: 0.28, green: 0.52, blue: 0.96)
+    public static var accentPrimary: Color { VGTokens.Colors.accentPrimary }
 
     // MARK: Radii
-    public static let radiusCard: CGFloat = 12
-    public static let radiusControl: CGFloat = 8
-    public static let radiusBadge: CGFloat = 6
+    public static var radiusCard: CGFloat { VGTokens.Radius.card }
+    public static var radiusControl: CGFloat { VGTokens.Radius.control }
+    public static var radiusBadge: CGFloat { VGTokens.Radius.badge }
 
     // MARK: Spacing
-    public static let pagePadding: CGFloat = 24
-    public static let sheetPadding: CGFloat = 20
-    public static let cardPadding: CGFloat = 16
-    public static let sectionSpacing: CGFloat = 20
+    public static var pagePadding: CGFloat { VGTokens.Spacing.pagePadding }
+    public static var sheetPadding: CGFloat { VGTokens.Spacing.sheetPadding }
+    public static var cardPadding: CGFloat { VGTokens.Spacing.cardPadding }
+    public static var sectionSpacing: CGFloat { VGTokens.Spacing.sectionGap }
 }
 
 // MARK: - Formatters & Sanitizers
@@ -263,7 +242,7 @@ public struct VGCard<Content: View>: View {
     let content: Content
 
     public init(
-        padding: CGFloat = VGTheme.cardPadding,
+        padding: CGFloat = VGComponentTokens.Card.padding,
         accentBorder: Color? = nil,
         @ViewBuilder content: () -> Content
     ) {
@@ -276,12 +255,17 @@ public struct VGCard<Content: View>: View {
         content
             .padding(padding)
             .background(
-                RoundedRectangle(cornerRadius: VGTheme.radiusCard, style: .continuous)
-                    .fill(VGTheme.surfaceLevel1)
+                RoundedRectangle(cornerRadius: VGComponentTokens.Card.cornerRadius, style: .continuous)
+                    .fill(VGComponentTokens.Card.background)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: VGTheme.radiusCard, style: .continuous)
-                    .strokeBorder(accentBorder ?? VGTheme.borderSubtle, lineWidth: accentBorder != nil ? 1 : 0.75)
+                RoundedRectangle(cornerRadius: VGComponentTokens.Card.cornerRadius, style: .continuous)
+                    .strokeBorder(
+                        accentBorder ?? VGComponentTokens.Card.border,
+                        lineWidth: accentBorder != nil
+                            ? VGComponentTokens.Card.accentBorderWidth
+                            : VGComponentTokens.Card.borderWidth
+                    )
             )
     }
 }
@@ -303,26 +287,26 @@ public struct VGPageHeader<Actions: View>: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .center, spacing: VGTokens.Spacing.gridGap) {
+                VStack(alignment: .leading, spacing: VGPrimitives.Space.s2) {
                     Text(title)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.primary)
+                        .font(VGTokens.Typography.pageTitle)
+                        .foregroundStyle(VGTokens.Colors.textPrimary)
 
                     if let subtitle, !subtitle.isEmpty {
                         Text(subtitle)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
+                            .font(VGTokens.Typography.caption)
+                            .foregroundStyle(VGTokens.Colors.textSecondary)
                             .lineLimit(1)
                     }
                 }
 
-                Spacer(minLength: 12)
+                Spacer(minLength: VGTokens.Spacing.gridGap)
 
                 actions
             }
-            .padding(.horizontal, VGTheme.pagePadding)
-            .padding(.vertical, 16)
+            .padding(.horizontal, VGTokens.Spacing.pagePadding)
+            .padding(.vertical, VGTokens.Spacing.cardPadding)
 
             Divider()
                 .opacity(0.6)
@@ -347,14 +331,14 @@ public struct VGSectionHeader<Trailing: View>: View {
 
     public var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: VGPrimitives.Space.s2) {
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.primary)
+                    .font(VGTokens.Typography.cardTitle)
+                    .foregroundStyle(VGTokens.Colors.textPrimary)
                 if let subtitle, !subtitle.isEmpty {
                     Text(subtitle)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .font(VGTokens.Typography.caption)
+                        .foregroundStyle(VGTokens.Colors.textSecondary)
                 }
             }
             Spacer()
@@ -373,11 +357,11 @@ public struct VGStatusBadge: View {
 
         var color: Color {
             switch self {
-            case .protected: return VGTheme.statusProtected
-            case .warning: return VGTheme.statusWarning
-            case .danger: return VGTheme.statusDanger
-            case .accent: return VGTheme.accentPrimary
-            case .neutral: return .secondary
+            case .protected: return VGTokens.Colors.statusProtected
+            case .warning: return VGTokens.Colors.statusWarning
+            case .danger: return VGTokens.Colors.statusDanger
+            case .accent: return VGTokens.Colors.accentPrimary
+            case .neutral: return VGTokens.Colors.textSecondary
             }
         }
     }
@@ -393,26 +377,30 @@ public struct VGStatusBadge: View {
     }
 
     public var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: VGPrimitives.Space.s4) {
             if showDot {
                 Circle()
                     .fill(tone.color)
-                    .frame(width: 6, height: 6)
+                    .frame(width: VGComponentTokens.Badge.dotSize, height: VGComponentTokens.Badge.dotSize)
+                    .accessibilityHidden(true)
             }
             Text(text)
-                .font(.system(size: 10, weight: .semibold))
+                .font(VGTokens.Typography.badge)
                 .monospacedDigit()
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 3)
-        .foregroundStyle(tone == .neutral ? Color.secondary : tone.color)
+        .padding(.horizontal, VGComponentTokens.Badge.horizontalPadding)
+        .padding(.vertical, VGComponentTokens.Badge.verticalPadding)
+        .foregroundStyle(tone == .neutral ? VGTokens.Colors.textSecondary : tone.color)
         .background(
-            RoundedRectangle(cornerRadius: VGTheme.radiusBadge, style: .continuous)
-                .fill(tone == .neutral ? VGTheme.surfaceLevel2 : tone.color.opacity(0.14))
+            RoundedRectangle(cornerRadius: VGComponentTokens.Badge.cornerRadius, style: .continuous)
+                .fill(tone == .neutral ? VGTokens.Colors.surfaceLevel2 : tone.color.opacity(VGComponentTokens.Badge.fillOpacity))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: VGTheme.radiusBadge, style: .continuous)
-                .strokeBorder(tone == .neutral ? VGTheme.borderSubtle : tone.color.opacity(0.25), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: VGComponentTokens.Badge.cornerRadius, style: .continuous)
+                .strokeBorder(
+                    tone == .neutral ? VGTokens.Colors.borderSubtle : tone.color.opacity(VGComponentTokens.Badge.borderOpacity),
+                    lineWidth: 0.5
+                )
         )
     }
 }
@@ -426,7 +414,7 @@ public struct VGKeyValueRow: View {
     public init(
         _ key: String,
         value: String,
-        valueColor: Color = .primary,
+        valueColor: Color = VGTokens.Colors.textPrimary,
         monospaced: Bool = true
     ) {
         self.key = key
@@ -436,16 +424,16 @@ public struct VGKeyValueRow: View {
     }
 
     public var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: VGPrimitives.Space.s10) {
             Text(key)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .font(VGTokens.Typography.caption)
+                .foregroundStyle(VGTokens.Colors.textSecondary)
                 .fixedSize(horizontal: true, vertical: false)
 
-            Spacer(minLength: 8)
+            Spacer(minLength: VGTokens.Spacing.inlineGap)
 
             Text(value)
-                .font(.system(size: 11, weight: .medium, design: monospaced ? .monospaced : .default))
+                .font(monospaced ? VGTokens.Typography.monoCaption.weight(.medium) : VGTokens.Typography.captionEmphasis)
                 .monospacedDigit()
                 .foregroundStyle(valueColor)
                 .multilineTextAlignment(.trailing)
@@ -464,36 +452,38 @@ public struct VGSearchField: View {
     }
 
     public var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: VGTokens.Spacing.inlineGap) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .font(VGTokens.Typography.caption)
+                .foregroundStyle(VGTokens.Colors.textSecondary)
+                .accessibilityHidden(true)
 
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .font(VGTokens.Typography.body)
 
             if !text.isEmpty {
                 Button {
                     text = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                        .font(VGTokens.Typography.caption)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(VGIconButtonStyle())
                 .help("Очистить поиск")
+                .accessibilityLabel("Очистить поиск")
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.horizontal, VGPrimitives.Space.s10)
+        .padding(.vertical, text.isEmpty ? VGPrimitives.Space.s6 : VGPrimitives.Space.s2)
+        .frame(minHeight: 30)
         .background(
-            RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                .fill(VGTheme.surfaceLevel2)
+            RoundedRectangle(cornerRadius: VGTokens.Radius.control, style: .continuous)
+                .fill(VGTokens.Colors.surfaceLevel2)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                .strokeBorder(VGTheme.borderSubtle, lineWidth: 0.75)
+            RoundedRectangle(cornerRadius: VGTokens.Radius.control, style: .continuous)
+                .strokeBorder(VGTokens.Colors.borderSubtle, lineWidth: VGComponentTokens.Card.borderWidth)
         )
     }
 }
@@ -520,24 +510,25 @@ public struct VGEmptyStateView: View {
     }
 
     public var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: VGTokens.Spacing.gridGap) {
             ZStack {
-                RoundedRectangle(cornerRadius: VGTheme.radiusCard, style: .continuous)
-                    .fill(VGTheme.surfaceLevel2)
+                RoundedRectangle(cornerRadius: VGTokens.Radius.card, style: .continuous)
+                    .fill(VGTokens.Colors.surfaceLevel2)
                     .frame(width: 48, height: 48)
                 Image(systemName: icon)
                     .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(VGTokens.Colors.textSecondary)
             }
+            .accessibilityHidden(true)
 
-            VStack(spacing: 4) {
+            VStack(spacing: VGTokens.Spacing.microGap) {
                 Text(title)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.primary)
+                    .font(VGTokens.Typography.cardTitle)
+                    .foregroundStyle(VGTokens.Colors.textPrimary)
 
                 Text(message)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .font(VGTokens.Typography.caption)
+                    .foregroundStyle(VGTokens.Colors.textSecondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 380)
             }
@@ -546,11 +537,67 @@ public struct VGEmptyStateView: View {
                 Button(actionTitle, action: action)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.regular)
-                    .padding(.top, 4)
+                    .padding(.top, VGTokens.Spacing.microGap)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(32)
+        .padding(VGPrimitives.Space.s32)
+    }
+}
+
+public struct VGLoadingStateView: View {
+    let message: String
+
+    public init(_ message: String) {
+        self.message = message
+    }
+
+    public var body: some View {
+        VStack(spacing: VGTokens.Spacing.gridGap) {
+            ProgressView()
+                .controlSize(.regular)
+            Text(message)
+                .font(VGTokens.Typography.caption)
+                .foregroundStyle(VGTokens.Colors.textSecondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(VGPrimitives.Space.s32)
+    }
+}
+
+public struct VGErrorBanner: View {
+    let message: String
+    let retryTitle: String?
+    let onRetry: (() -> Void)?
+
+    public init(
+        message: String,
+        retryTitle: String? = nil,
+        onRetry: (() -> Void)? = nil
+    ) {
+        self.message = message
+        self.retryTitle = retryTitle
+        self.onRetry = onRetry
+    }
+
+    public var body: some View {
+        VGCard(padding: VGComponentTokens.Card.paddingCompact, accentBorder: VGTokens.Colors.statusDanger.opacity(0.35)) {
+            HStack(spacing: VGPrimitives.Space.s10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(VGTokens.Colors.statusDanger)
+                    .accessibilityHidden(true)
+                Text(message)
+                    .font(VGTokens.Typography.body)
+                    .foregroundStyle(VGTokens.Colors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: VGTokens.Spacing.inlineGap)
+                if let retryTitle, let onRetry {
+                    Button(retryTitle, action: onRetry)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+            }
+        }
     }
 }
 
@@ -560,6 +607,7 @@ public struct VGCopyButton: View {
     let helpText: String
     let onCopied: (() -> Void)?
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isCopied = false
 
     public init(
@@ -578,30 +626,37 @@ public struct VGCopyButton: View {
         Button {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(valueToCopy, forType: .string)
-            withAnimation(.snappy(duration: 0.2)) {
+            withAnimation(VGTokens.Motion.snappy(reduceMotion: reduceMotion)) {
                 isCopied = true
             }
             onCopied?()
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                withAnimation(.snappy(duration: 0.2)) {
+                withAnimation(VGTokens.Motion.snappy(reduceMotion: reduceMotion)) {
                     isCopied = false
                 }
             }
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: VGPrimitives.Space.s4) {
                 Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(isCopied ? VGTheme.statusProtected : .secondary)
+                    .font(VGTokens.Typography.captionEmphasis)
+                    .foregroundStyle(isCopied ? VGTokens.Colors.statusProtected : VGTokens.Colors.textSecondary)
+                    .accessibilityHidden(true)
                 if let label {
                     Text(isCopied ? "Скопировано" : label)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(isCopied ? VGTheme.statusProtected : .primary)
+                        .font(VGTokens.Typography.captionEmphasis)
+                        .foregroundStyle(isCopied ? VGTokens.Colors.statusProtected : VGTokens.Colors.textPrimary)
                 }
             }
-            .contentTransition(.symbolEffect(.replace))
+            .frame(
+                minWidth: label == nil ? VGComponentTokens.Button.minIconHitTarget : nil,
+                minHeight: VGComponentTokens.Button.minIconHitTarget
+            )
+            .padding(.horizontal, label == nil ? 0 : VGPrimitives.Space.s8)
+            .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(VGIconButtonStyle())
         .help(helpText)
+        .accessibilityLabel(isCopied ? "Скопировано" : (label ?? helpText))
     }
 }
 
@@ -613,14 +668,15 @@ public struct VGUnsavedChangesBar: View {
     public var body: some View {
         VStack(spacing: 0) {
             Divider().opacity(0.6)
-            HStack(spacing: 12) {
-                HStack(spacing: 8) {
+            HStack(spacing: VGTokens.Spacing.gridGap) {
+                HStack(spacing: VGTokens.Spacing.inlineGap) {
                     Circle()
-                        .fill(VGTheme.statusWarning)
+                        .fill(VGTokens.Colors.statusWarning)
                         .frame(width: 7, height: 7)
+                        .accessibilityHidden(true)
                     Text("Есть несохранённые изменения правил")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.primary)
+                        .font(VGTokens.Typography.bodyEmphasis)
+                        .foregroundStyle(VGTokens.Colors.textPrimary)
                 }
 
                 Spacer()
@@ -631,7 +687,7 @@ public struct VGUnsavedChangesBar: View {
                     .disabled(isApplying)
 
                 Button(action: onApply) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: VGPrimitives.Space.s6) {
                         if isApplying {
                             ProgressView()
                                 .controlSize(.small)
@@ -643,29 +699,26 @@ public struct VGUnsavedChangesBar: View {
                 .controlSize(.regular)
                 .disabled(isApplying)
             }
-            .padding(.horizontal, VGTheme.pagePadding)
-            .padding(.vertical, 12)
-            .background(VGTheme.statusWarning.opacity(0.08))
+            .padding(.horizontal, VGTokens.Spacing.pagePadding)
+            .padding(.vertical, VGTokens.Spacing.cardPaddingCompact)
+            .background(VGTokens.Colors.statusWarning.opacity(0.08))
         }
     }
 }
 
 public struct VGHoverRowModifier: ViewModifier {
     let cornerRadius: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
 
     public func body(content: Content) -> some View {
         content
             .background(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(isHovered ? VGTheme.surfaceHover : VGTheme.surfaceLevel1)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(VGTheme.borderSubtle, lineWidth: 0.75)
+                    .fill(isHovered ? VGTokens.Colors.surfaceHover : .clear)
             )
             .onHover { hovering in
-                withAnimation(.snappy(duration: 0.15)) {
+                withAnimation(VGTokens.Motion.hover(reduceMotion: reduceMotion)) {
                     isHovered = hovering
                 }
             }
@@ -673,7 +726,121 @@ public struct VGHoverRowModifier: ViewModifier {
 }
 
 public extension View {
-    func vgHoverRow(cornerRadius: CGFloat = VGTheme.radiusControl) -> some View {
+    func vgHoverRow(cornerRadius: CGFloat = VGComponentTokens.Row.cornerRadius) -> some View {
         modifier(VGHoverRowModifier(cornerRadius: cornerRadius))
+    }
+}
+
+// MARK: - Focus-Aware Native Button Styles
+
+/// Accessible icon-only button style with 28pt minimum hit target, hover feedback, and visible focus ring.
+public struct VGIconButtonStyle: ButtonStyle {
+    let isDestructive: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
+    @FocusState private var isFocused: Bool
+    @State private var isHovered = false
+
+    public init(isDestructive: Bool = false) {
+        self.isDestructive = isDestructive
+    }
+
+    public func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(foregroundColor(isPressed: configuration.isPressed))
+            .frame(
+                minWidth: VGComponentTokens.Button.minIconHitTarget,
+                minHeight: VGComponentTokens.Button.minIconHitTarget
+            )
+            .background(
+                RoundedRectangle(cornerRadius: VGComponentTokens.Button.cornerRadius, style: .continuous)
+                    .fill(backgroundColor(isPressed: configuration.isPressed))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: VGComponentTokens.Button.cornerRadius, style: .continuous)
+                    .strokeBorder(
+                        isFocused ? VGTokens.Colors.accentPrimary : .clear,
+                        lineWidth: 2
+                    )
+            )
+            .contentShape(RoundedRectangle(cornerRadius: VGComponentTokens.Button.cornerRadius, style: .continuous))
+            .focusable()
+            .focused($isFocused)
+            .onHover { hovering in
+                withAnimation(VGTokens.Motion.hover(reduceMotion: reduceMotion)) {
+                    isHovered = hovering
+                }
+            }
+            .opacity(isEnabled ? 1.0 : 0.45)
+    }
+
+    private func foregroundColor(isPressed: Bool) -> Color {
+        if isDestructive && (isHovered || isPressed) {
+            return VGTokens.Colors.statusDanger
+        }
+        return (isHovered || isPressed) ? VGTokens.Colors.textPrimary : VGTokens.Colors.textSecondary
+    }
+
+    private func backgroundColor(isPressed: Bool) -> Color {
+        if isPressed {
+            return VGTokens.Colors.sidebarSelection
+        }
+        if isHovered {
+            return isDestructive ? VGTokens.Colors.statusDanger.opacity(0.12) : VGTokens.Colors.surfaceHover
+        }
+        return .clear
+    }
+}
+
+/// Subtle surface button style for secondary/sidebar actions with hover, pressed state, and focus ring.
+public struct VGSurfaceButtonStyle: ButtonStyle {
+    let isHighlighted: Bool
+    let highlightTint: Color
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
+    @FocusState private var isFocused: Bool
+    @State private var isHovered = false
+
+    public init(isHighlighted: Bool = false, highlightTint: Color = VGTokens.Colors.accentPrimary) {
+        self.isHighlighted = isHighlighted
+        self.highlightTint = highlightTint
+    }
+
+    public func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                RoundedRectangle(cornerRadius: VGComponentTokens.Button.cornerRadius, style: .continuous)
+                    .fill(backgroundColor(isPressed: configuration.isPressed))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: VGComponentTokens.Button.cornerRadius, style: .continuous)
+                    .strokeBorder(
+                        isFocused
+                            ? VGTokens.Colors.accentPrimary
+                            : (isHighlighted ? highlightTint.opacity(0.35) : VGTokens.Colors.borderSubtle),
+                        lineWidth: isFocused ? 2 : VGComponentTokens.Card.borderWidth
+                    )
+            )
+            .contentShape(RoundedRectangle(cornerRadius: VGComponentTokens.Button.cornerRadius, style: .continuous))
+            .focusable()
+            .focused($isFocused)
+            .onHover { hovering in
+                withAnimation(VGTokens.Motion.hover(reduceMotion: reduceMotion)) {
+                    isHovered = hovering
+                }
+            }
+            .opacity(isEnabled ? 1.0 : 0.5)
+    }
+
+    private func backgroundColor(isPressed: Bool) -> Color {
+        if isPressed {
+            return isHighlighted ? highlightTint.opacity(0.22) : VGTokens.Colors.sidebarSelection
+        }
+        if isHovered {
+            return isHighlighted ? highlightTint.opacity(0.18) : VGTokens.Colors.surfaceHover
+        }
+        return isHighlighted ? highlightTint.opacity(0.14) : VGTokens.Colors.surfaceLevel1
     }
 }

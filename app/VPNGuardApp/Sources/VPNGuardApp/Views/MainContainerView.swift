@@ -26,6 +26,7 @@ public enum NavigationSection: String, CaseIterable, Identifiable {
 public struct MainContainerView: View {
     @ObservedObject var vm: VPNGuardViewModel
     @ObservedObject private var releaseUpdater = GitHubReleaseUpdater.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedSection: NavigationSection = .dashboard
     @State private var showingUpdateSheet: Bool = false
 
@@ -37,61 +38,67 @@ public struct MainContainerView: View {
         NavigationSplitView {
             VStack(spacing: 0) {
                 // Brand Header
-                HStack(spacing: 8) {
+                HStack(spacing: VGTokens.Spacing.inlineGap) {
                     Image(systemName: "shield.lefthalf.filled")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(vm.isProtectionActive ? VGTheme.statusProtected : .secondary)
+                        .font(VGTokens.Typography.cardTitle)
+                        .foregroundStyle(vm.isProtectionActive ? VGTokens.Colors.statusProtected : VGTokens.Colors.textSecondary)
+                        .accessibilityHidden(true)
                     Text("VPNGuard")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.primary)
+                        .font(VGTokens.Typography.cardTitle)
+                        .foregroundStyle(VGTokens.Colors.textPrimary)
                     Spacer()
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 14)
-                .padding(.bottom, 10)
+                .padding(.horizontal, VGTokens.Spacing.cardPadding)
+                .padding(.top, VGPrimitives.Space.s14)
+                .padding(.bottom, VGPrimitives.Space.s10)
 
-                // Native-styled monochrome sidebar items
-                VStack(spacing: 3) {
-                    ForEach(NavigationSection.allCases) { section in
-                        SidebarNavItem(
-                            section: section,
-                            isSelected: selectedSection == section
-                        ) {
-                            withAnimation(.snappy(duration: 0.2)) {
-                                selectedSection = section
+                // Native macOS Sidebar with keyboard arrow navigation & VoiceOver support
+                List(
+                    NavigationSection.allCases,
+                    selection: Binding<NavigationSection?>(
+                        get: { selectedSection },
+                        set: { next in
+                            if let next {
+                                withAnimation(VGTokens.Motion.snappy(reduceMotion: reduceMotion)) {
+                                    selectedSection = next
+                                }
                             }
                         }
-                    }
+                    )
+                ) { section in
+                    Label(section.rawValue, systemImage: section.iconName)
+                        .font(selectedSection == section ? VGTokens.Typography.bodyEmphasis : VGTokens.Typography.body)
+                        .tag(section)
                 }
-                .padding(.horizontal, 10)
-
-                Spacer()
+                .listStyle(.sidebar)
+                .scrollContentBackground(.hidden)
 
                 Divider().opacity(0.6)
 
                 // Sidebar Footer: Status + Launch at Login + Updates
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 7) {
+                VStack(alignment: .leading, spacing: VGPrimitives.Space.s10) {
+                    HStack(spacing: VGPrimitives.Space.s6) {
                         Circle()
-                            .fill(vm.isProtectionActive ? VGTheme.statusProtected : ((vm.isPauseActive || vm.isTunnelRecovering) ? VGTheme.statusWarning : VGTheme.statusDanger))
+                            .fill(vm.isProtectionActive ? VGTokens.Colors.statusProtected : ((vm.isPauseActive || vm.isTunnelRecovering) ? VGTokens.Colors.statusWarning : VGTokens.Colors.statusDanger))
                             .frame(width: 7, height: 7)
+                            .accessibilityHidden(true)
 
                         if let pauseEnd = vm.pauseEndDate, vm.isPauseActive {
                             TimelineView(.periodic(from: .now, by: 1.0)) { context in
                                 let countdown = VGFormatters.formatCountdown(until: pauseEnd, now: context.date) ?? "00:00"
                                 Text("Пауза Wi-Fi (\(countdown))")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(VGTokens.Typography.captionEmphasis)
                                     .monospacedDigit()
-                                    .foregroundStyle(VGTheme.statusWarning)
+                                    .foregroundStyle(VGTokens.Colors.statusWarning)
                             }
                         } else if vm.isTunnelRecovering {
                             Text("Kill-Switch активен")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(VGTheme.statusWarning)
+                                .font(VGTokens.Typography.captionEmphasis)
+                                .foregroundStyle(VGTokens.Colors.statusWarning)
                         } else {
                             Text(vm.isProtectionActive ? "Защита активна" : "Защита отключена")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(.primary)
+                                .font(VGTokens.Typography.captionEmphasis)
+                                .foregroundStyle(VGTokens.Colors.textPrimary)
                         }
                         Spacer()
                     }
@@ -102,40 +109,34 @@ public struct MainContainerView: View {
                     ))
                     .toggleStyle(.checkbox)
                     .controlSize(.small)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .font(VGTokens.Typography.caption)
+                    .foregroundStyle(VGTokens.Colors.textSecondary)
 
                     let hasUpdate = releaseUpdater.isUpdateAvailable || releaseUpdater.backendSyncNeeded || (vm.updateCheckResult?.updateAvailable == true)
                     Button {
                         showingUpdateSheet = true
                     } label: {
-                        HStack(spacing: 6) {
+                        HStack(spacing: VGPrimitives.Space.s6) {
                             Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 11))
+                                .font(VGTokens.Typography.caption)
+                                .accessibilityHidden(true)
                             Text(hasUpdate ? "Доступно обновление" : "Обновление…")
-                                .font(.system(size: 11, weight: hasUpdate ? .semibold : .medium))
+                                .font(hasUpdate ? VGTokens.Typography.captionEmphasis : VGTokens.Typography.caption)
                             Spacer()
                             if hasUpdate {
                                 Circle()
-                                    .fill(VGTheme.accentPrimary)
+                                    .fill(VGTokens.Colors.accentPrimary)
                                     .frame(width: 7, height: 7)
+                                    .accessibilityHidden(true)
                             }
                         }
-                        .foregroundStyle(hasUpdate ? .primary : .secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                                .fill(hasUpdate ? VGTheme.accentPrimary.opacity(0.14) : VGTheme.surfaceLevel1)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                                .strokeBorder(hasUpdate ? VGTheme.accentPrimary.opacity(0.3) : VGTheme.borderSubtle, lineWidth: 0.75)
-                        )
+                        .foregroundStyle(hasUpdate ? VGTokens.Colors.textPrimary : VGTokens.Colors.textSecondary)
+                        .padding(.horizontal, VGTokens.Spacing.inlineGap)
+                        .padding(.vertical, VGPrimitives.Space.s6)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(VGSurfaceButtonStyle(isHighlighted: hasUpdate, highlightTint: VGTokens.Colors.accentPrimary))
                 }
-                .padding(14)
+                .padding(VGPrimitives.Space.s14)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .navigationSplitViewColumnWidth(min: 196, ideal: 212, max: 248)
@@ -160,19 +161,20 @@ public struct MainContainerView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(VGTheme.backgroundContent)
 
-                // Floating Toast
+                // Floating Toast (offset above VGUnsavedChangesBar when visible)
                 if let toast = vm.toastMessage {
                     ToastView(message: toast, isError: vm.toastIsError)
-                        .padding(.bottom, 20)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .padding(.bottom, vm.hasUnappliedChanges ? 76 : VGTokens.Spacing.sectionGap)
+                        .transition(VGTokens.Motion.toastTransition(reduceMotion: reduceMotion))
                 }
             }
-            .animation(.snappy(duration: 0.2), value: vm.toastMessage)
+            .animation(VGTokens.Motion.snappy(reduceMotion: reduceMotion), value: vm.toastMessage)
+            .animation(VGTokens.Motion.snappy(reduceMotion: reduceMotion), value: vm.hasUnappliedChanges)
         }
         .frame(minWidth: 820, minHeight: 560)
         .onChange(of: vm.requestedNavigationSection) { _, next in
             if let next {
-                withAnimation(.snappy(duration: 0.2)) {
+                withAnimation(VGTokens.Motion.snappy(reduceMotion: reduceMotion)) {
                     selectedSection = next
                 }
                 vm.requestedNavigationSection = nil
@@ -193,40 +195,6 @@ public struct MainContainerView: View {
     }
 }
 
-private struct SidebarNavItem: View {
-    let section: NavigationSection
-    let isSelected: Bool
-    let action: () -> Void
-
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 9) {
-                Image(systemName: section.iconName)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-                    .foregroundStyle(isSelected ? .primary : .secondary)
-                    .frame(width: 18, alignment: .center)
-
-                Text(section.rawValue)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
-                    .foregroundStyle(isSelected ? .primary : .secondary)
-
-                Spacer()
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(
-                RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                    .fill(isSelected ? VGTheme.sidebarSelection : (isHovered ? VGTheme.surfaceLevel1 : .clear))
-            )
-            .contentShape(RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
-    }
-}
-
 private struct AppUpdateSheetView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var vm: VPNGuardViewModel
@@ -244,11 +212,11 @@ private struct AppUpdateSheetView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Обновление и обслуживание")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(VGTokens.Typography.sheetTitle)
                     Text("Версия \(releaseUpdater.currentVersion) • Проверка релизов GitHub и локальной сборки")
-                        .font(.system(size: 12))
+                        .font(VGTokens.Typography.caption)
                         .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(VGTokens.Colors.textSecondary)
                 }
                 Spacer()
             }

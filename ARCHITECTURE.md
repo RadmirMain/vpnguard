@@ -222,14 +222,14 @@ app/VPNGuardApp/
 │       │   └── VPNGuardViewModel.swift  # Параллельный старт, stateEpoch, UI NWPathMonitor, willSleep/didWake, failover
 │       └── Views/
 │           ├── Apps/ (AppPickerSheet.swift, AppsManagementView.swift — стабильный Binding по id + AppIconCache)
-│           ├── Common/ (DesignSystem.swift [AppIconCache, VGFormatters, VGCard], ToastView.swift)
+│           ├── Common/ (DesignTokens.swift [VGPrimitives, VGTokens, VGComponentTokens], DesignSystem.swift [VGCard, VGLoadingStateView, VGErrorBanner, VGIconButtonStyle, VGSurfaceButtonStyle, AppIconCache, VGFormatters], ToastView.swift)
 │           ├── Dashboard/DashboardView.swift
-│           ├── Diagnostics/DiagnosticsView.swift # 4-статусный аудит + Darwin.getgroups GID 888 + логи
+│           ├── Diagnostics/DiagnosticsView.swift # 4-статусный аудит + Darwin.getgroups GID 888 + логи + ViewThatFits
 │           ├── MenuBar/MenuBarExtraView.swift    # Captive Portal (TimelineView), Tunnel Health, Browser Launcher
-│           ├── Server/ServerConfigView.swift     # Единый список серверов, AddServerSheet, GID 890 Ping, Auto-Failover
-│           ├── Traffic/TrafficMonitorView.swift  # Кешированная группировка, Live Runtime Inspector sheet, 1-click rules
-│           ├── Websites/WebsitesManagementView.swift # Стабильный Binding по id
-│           └── MainContainerView.swift           # Monochrome Sidebar + AppUpdateSheetView
+│           ├── Server/ServerConfigView.swift     # Единый список серверов (коды стран, без эмодзи), AddServerSheet, GID 890 Ping, Auto-Failover
+│           ├── Traffic/TrafficMonitorView.swift  # Кешированная группировка, Live Runtime Inspector (keyboard/VoiceOver), 1-click rules
+│           ├── Websites/WebsitesManagementView.swift # Стабильный Binding по id + адаптивный LazyVGrid пресетов
+│           └── MainContainerView.swift           # Нативный List(selection:) Sidebar + AppUpdateSheetView + ReduceMotion
 └── Tests/VPNGuardAppTests/
     └── VPNGuardAppTests.swift                # 16 unit-тестов (AuditStatus, Explain chain, tunnelRecovering, Ed25519)
 ```

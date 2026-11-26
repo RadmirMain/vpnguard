@@ -67,21 +67,23 @@ public struct WebsitesManagementView: View {
                                 newDomainText = ""
                             } label: {
                                 Image(systemName: "xmark.circle.fill")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
+                                    .font(VGTokens.Typography.caption)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(VGIconButtonStyle())
+                            .help("Очистить поле домена")
+                            .accessibilityLabel("Очистить поле домена")
                         }
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
+                    .padding(.horizontal, VGPrimitives.Space.s10)
+                    .padding(.vertical, newDomainText.isEmpty ? VGPrimitives.Space.s6 : VGPrimitives.Space.s2)
+                    .frame(minHeight: 30)
                     .background(
-                        RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                            .fill(VGTheme.surfaceLevel2)
+                        RoundedRectangle(cornerRadius: VGTokens.Radius.control, style: .continuous)
+                            .fill(VGTokens.Colors.surfaceLevel2)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                            .strokeBorder(VGTheme.borderSubtle, lineWidth: 0.75)
+                        RoundedRectangle(cornerRadius: VGTokens.Radius.control, style: .continuous)
+                            .strokeBorder(VGTokens.Colors.borderSubtle, lineWidth: VGComponentTokens.Card.borderWidth)
                     )
 
                     Picker("", selection: $newDomainAction) {
@@ -91,37 +93,48 @@ public struct WebsitesManagementView: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
-                    .frame(width: 220)
+                    .frame(minWidth: 190, maxWidth: 220)
                     .fixedSize()
 
                     Button(action: addDomainAction) {
                         Label("Добавить", systemImage: "plus")
-                            .font(.system(size: 12, weight: .semibold))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
-                            .background(VGTheme.accentPrimary, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
-                            .foregroundStyle(.white)
+                            .font(VGTokens.Typography.bodyEmphasis)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderedProminent)
+                    .tint(VGTokens.Colors.accentPrimary)
+                    .controlSize(.regular)
                     .fixedSize()
                     .disabled(newDomainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
 
-                HStack(spacing: 12) {
-                    Picker("", selection: $selectedFilter) {
-                        ForEach(DomainFilter.allCases) { filter in
-                            Text(filter.rawValue).tag(filter)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: VGTokens.Spacing.gridGap) {
+                        Picker("", selection: $selectedFilter) {
+                            ForEach(DomainFilter.allCases) { filter in
+                                Text(filter.rawValue).tag(filter)
+                            }
                         }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .fixedSize()
+
+                        Spacer(minLength: VGTokens.Spacing.inlineGap)
+
+                        VGSearchField("Поиск по доменам…", text: $searchDomain)
+                            .frame(minWidth: 180, maxWidth: 240)
                     }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .frame(width: 290)
-                    .fixedSize()
 
-                    Spacer()
+                    VStack(alignment: .leading, spacing: VGTokens.Spacing.inlineGap) {
+                        Picker("", selection: $selectedFilter) {
+                            ForEach(DomainFilter.allCases) { filter in
+                                Text(filter.rawValue).tag(filter)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
 
-                    VGSearchField("Поиск по доменам…", text: $searchDomain)
-                        .frame(maxWidth: 240)
+                        VGSearchField("Поиск по доменам…", text: $searchDomain)
+                    }
                 }
             }
             .padding(.horizontal, VGTheme.pagePadding)
@@ -170,28 +183,28 @@ public struct WebsitesManagementView: View {
     }
 
     private var presetsBlock: some View {
-        VGCard(padding: 12) {
-            VStack(alignment: .leading, spacing: 10) {
+        VGCard(padding: VGComponentTokens.Card.paddingCompact) {
+            VStack(alignment: .leading, spacing: VGTokens.Spacing.inlineGap) {
                 Text("Системные пресеты маршрутизации")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .font(VGTokens.Typography.captionEmphasis)
+                    .foregroundStyle(VGTokens.Colors.textSecondary)
 
-                HStack(spacing: 14) {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 220), spacing: VGTokens.Spacing.gridGap)],
+                    alignment: .leading,
+                    spacing: VGTokens.Spacing.inlineGap
+                ) {
                     presetToggle(
                         title: "AI-сервисы через туннель",
                         subtitle: "OpenAI, Anthropic, Cursor, GitHub",
                         isOn: $vm.rules.presets.aiServicesProxy
                     )
 
-                    Divider().frame(height: 28).opacity(0.45)
-
                     presetToggle(
                         title: "Сервисы РФ напрямую",
                         subtitle: ".ru, .рф, Госуслуги, Банки",
                         isOn: $vm.rules.presets.ruDirect
                     )
-
-                    Divider().frame(height: 28).opacity(0.45)
 
                     presetToggle(
                         title: "Блокировка QUIC",
@@ -204,19 +217,19 @@ public struct WebsitesManagementView: View {
     }
 
     private func presetToggle(title: String, subtitle: String, isOn: Binding<Bool>) -> some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: VGTokens.Spacing.inlineGap) {
+            VStack(alignment: .leading, spacing: VGPrimitives.Space.s2) {
                 Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.primary)
+                    .font(VGTokens.Typography.bodyEmphasis)
+                    .foregroundStyle(VGTokens.Colors.textPrimary)
                     .lineLimit(1)
                 Text(subtitle)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                    .font(VGTokens.Typography.caption)
+                    .foregroundStyle(VGTokens.Colors.textSecondary)
                     .lineLimit(1)
             }
 
-            Spacer(minLength: 6)
+            Spacer(minLength: VGPrimitives.Space.s6)
 
             Toggle("", isOn: isOn)
                 .toggleStyle(.switch)
@@ -289,13 +302,11 @@ private struct DomainRuleRow: View {
 
             Button(action: onDelete) {
                 Image(systemName: "trash")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
+                    .font(VGTokens.Typography.body)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(VGIconButtonStyle(isDestructive: true))
             .help("Удалить правило")
+            .accessibilityLabel("Удалить правило для \(rule.domain)")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)

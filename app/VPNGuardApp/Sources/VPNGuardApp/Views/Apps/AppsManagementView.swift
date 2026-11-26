@@ -35,13 +35,11 @@ public struct AppsManagementView: View {
                     showingPickerSheet = true
                 } label: {
                     Label("Добавить приложение", systemImage: "plus")
-                        .font(.system(size: 12, weight: .semibold))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(VGTheme.accentPrimary, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
-                        .foregroundStyle(.white)
+                        .font(VGTokens.Typography.bodyEmphasis)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderedProminent)
+                .tint(VGTokens.Colors.accentPrimary)
+                .controlSize(.regular)
             }
 
             HStack(spacing: 12) {
@@ -169,13 +167,11 @@ private struct AppRuleRow: View {
 
             Button(action: onDelete) {
                 Image(systemName: "trash")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
+                    .font(VGTokens.Typography.body)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(VGIconButtonStyle(isDestructive: true))
             .help("Удалить правило")
+            .accessibilityLabel("Удалить правило для \(app.name)")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)

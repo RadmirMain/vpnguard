@@ -19,20 +19,20 @@ public struct VPNGuardApp: App {
             HStack(spacing: 4) {
                 if let pauseEnd = vm.pauseEndDate, vm.isPauseActive {
                     TimelineView(.periodic(from: .now, by: 1.0)) { context in
-                        HStack(spacing: 4) {
+                        HStack(spacing: VGPrimitives.Space.s4) {
                             Image(systemName: "clock.arrow.circlepath")
-                                .foregroundColor(.orange)
+                                .foregroundStyle(VGTokens.Colors.statusWarning)
                             if let countdown = VGFormatters.formatCountdown(until: pauseEnd, now: context.date) {
                                 Text(countdown)
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .font(VGTokens.Typography.monoCaption.weight(.semibold))
                                     .monospacedDigit()
-                                    .foregroundColor(.orange)
+                                    .foregroundStyle(VGTokens.Colors.statusWarning)
                             }
                         }
                     }
                 } else {
                     Image(systemName: vm.isProtectionActive ? "shield.fill" : (vm.isTunnelRecovering ? "exclamationmark.shield.fill" : "shield.slash.fill"))
-                        .foregroundColor(vm.isProtectionActive ? .green : (vm.isTunnelRecovering ? .orange : .secondary))
+                        .foregroundStyle(vm.isProtectionActive ? VGTokens.Colors.statusProtected : (vm.isTunnelRecovering ? VGTokens.Colors.statusWarning : VGTokens.Colors.textSecondary))
                 }
             }
         }
