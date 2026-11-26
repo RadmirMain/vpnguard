@@ -6,6 +6,7 @@
 #   + System-wide Fail-Closed Packet Filter (PF) Kill-Switch
 # ==============================================================================
 set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 C_RESET="\033[0m"
 C_BOLD="\033[1m"
@@ -15,6 +16,8 @@ C_YELLOW="\033[33m"
 C_CYAN="\033[36m"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Leave any TCC-protected CWD (e.g. ~/Desktop) and avoid world-writable /tmp so privileged tools never fail or load untrusted modules
+cd /
 BACKEND_ONLY=0
 for arg in "$@"; do
     case "${arg}" in
@@ -198,7 +201,7 @@ fi
 echo -e "${C_BOLD}[5/9] Deploying sing-box configuration (/usr/local/etc/vpnguard/sing-box.json)...${C_RESET}"
 API_SECRET_FILE="/usr/local/etc/vpnguard/api_secret"
 if [[ ! -f "${API_SECRET_FILE}" ]]; then
-    python3 -c 'import secrets; print(secrets.token_hex(16))' > "${API_SECRET_FILE}"
+    python3 -I -c 'import secrets; print(secrets.token_hex(16))' > "${API_SECRET_FILE}"
 fi
 chown root:admin "${API_SECRET_FILE}"
 chmod 640 "${API_SECRET_FILE}"
@@ -209,7 +212,7 @@ if [[ ! -f "/usr/local/etc/vpnguard/rules.json" ]] && [[ -f "${SCRIPT_DIR}/src/r
     chmod 644 /usr/local/etc/vpnguard/rules.json
 fi
 
-python3 -c "
+python3 -I -c "
 import json, sys, os
 sys.path.insert(0, '${SCRIPT_DIR}/src')
 import vpnguard
@@ -297,6 +300,9 @@ chmod 644 "${PF_CONF}"
 if pfctl -n -f "${PF_CONF}" &>/dev/null; then
     pfctl -f "${PF_CONF}" 2>/dev/null || true
     echo -e "    ${C_GREEN}✓ Linked anchor into ${PF_CONF}${C_RESET}"
+else
+    echo -e "    ${C_RED}[!] Error: ${PF_CONF} syntax check failed after anchor insertion!${C_RESET}"
+    exit 1
 fi
 
 # 8. Install CLI, Helper, and Sudoers rules
@@ -307,7 +313,18 @@ cp -R "${SCRIPT_DIR}/src" /usr/local/share/vpnguard/src
 chown -R root:wheel /usr/local/share/vpnguard
 chmod -R 755 /usr/local/share/vpnguard
 
-clang -Wall -Wextra -Werror -O2 -o /usr/local/bin/vpnguard-exec "${SCRIPT_DIR}/src/vpnguard_exec.c"
+if [[ "${BACKEND_ONLY}" -eq 1 && -f "${SCRIPT_DIR}/libexec/vpnguard-exec" ]] && file -b "${SCRIPT_DIR}/libexec/vpnguard-exec" | grep -q "Mach-O"; then
+    cp -f "${SCRIPT_DIR}/libexec/vpnguard-exec" /usr/local/bin/vpnguard-exec
+elif xcode-select -p &>/dev/null && command -v clang &>/dev/null && [[ -f "${SCRIPT_DIR}/src/vpnguard_exec.c" ]]; then
+    clang -Wall -Wextra -Werror -O2 -o /usr/local/bin/vpnguard-exec "${SCRIPT_DIR}/src/vpnguard_exec.c"
+elif [[ -f "${SCRIPT_DIR}/libexec/vpnguard-exec" ]] && file -b "${SCRIPT_DIR}/libexec/vpnguard-exec" | grep -q "Mach-O"; then
+    cp -f "${SCRIPT_DIR}/libexec/vpnguard-exec" /usr/local/bin/vpnguard-exec
+elif [[ -f "${SCRIPT_DIR}/bin/vpnguard-exec" ]] && file -b "${SCRIPT_DIR}/bin/vpnguard-exec" | grep -q "Mach-O"; then
+    cp -f "${SCRIPT_DIR}/bin/vpnguard-exec" /usr/local/bin/vpnguard-exec
+else
+    echo -e "    ${C_RED}[!] Error: Neither clang (Xcode CLT) nor prebuilt Mach-O vpnguard-exec found!${C_RESET}"
+    exit 1
+fi
 chown root:admin /usr/local/bin/vpnguard-exec
 chmod 4750 /usr/local/bin/vpnguard-exec
 
@@ -357,28 +374,69 @@ else
     exit 1
 fi
 
-# 9. Start daemons and arm PF
-echo -e "${C_BOLD}[9/9] Bootstrapping daemons and arming Fail-Closed PF Kill-Switch...${C_RESET}"
-launchctl bootout system/com.vpnguard.pf 2>/dev/null || true
-launchctl bootstrap system /Library/LaunchDaemons/com.vpnguard.pf.plist 2>/dev/null || launchctl load -w /Library/LaunchDaemons/com.vpnguard.pf.plist 2>/dev/null || true
+# 9. Respect template state and persistent desired_state before arming PF / starting daemons
+DESIRED_STATE_FILE="/var/db/vpnguard/desired_state"
+HAS_TEMPLATE_UUID=0
+if [[ -f "/usr/local/etc/vpnguard/xray.json" ]] && grep -q "REPLACE_WITH_UUID" /usr/local/etc/vpnguard/xray.json 2>/dev/null; then
+    HAS_TEMPLATE_UUID=1
+fi
 
-launchctl bootout system/com.vpnguard.xray 2>/dev/null || true
-launchctl bootstrap system /Library/LaunchDaemons/com.vpnguard.xray.plist 2>/dev/null || launchctl load -w /Library/LaunchDaemons/com.vpnguard.xray.plist 2>/dev/null || true
+EXISTING_DESIRED_STATE=""
+if [[ -f "${DESIRED_STATE_FILE}" ]]; then
+    EXISTING_DESIRED_STATE=$(tr -d '[:space:]' < "${DESIRED_STATE_FILE}" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+fi
 
-launchctl bootout system/com.vpnguard.singbox 2>/dev/null || true
-launchctl bootstrap system /Library/LaunchDaemons/com.vpnguard.singbox.plist 2>/dev/null || launchctl load -w /Library/LaunchDaemons/com.vpnguard.singbox.plist 2>/dev/null || true
+if [[ "${HAS_TEMPLATE_UUID}" -eq 1 ]]; then
+    echo -e "${C_BOLD}[9/9] Template xray.json detected (REPLACE_WITH_UUID); leaving Kill-Switch disarmed...${C_RESET}"
+    printf 'off\n' > "${DESIRED_STATE_FILE}"
+    chown root:wheel "${DESIRED_STATE_FILE}"
+    chmod 644 "${DESIRED_STATE_FILE}"
+    launchctl disable system/com.vpnguard.pf 2>/dev/null || true
+    launchctl disable system/com.vpnguard.singbox 2>/dev/null || true
+    launchctl bootout system/com.vpnguard.pf 2>/dev/null || true
+    launchctl bootout system/com.vpnguard.singbox 2>/dev/null || true
+    launchctl bootout system/com.vpnguard.xray 2>/dev/null || true
+    /usr/local/libexec/vpnguard-pf-boot.sh off >/dev/null 2>&1 || true
+    echo -e "    ${C_YELLOW}[i] Configure a valid server in VPNGuard.app or xray.json, then enable protection.${C_RESET}"
+elif [[ "${EXISTING_DESIRED_STATE}" == "off" ]]; then
+    echo -e "${C_BOLD}[9/9] Respecting desired_state=off; leaving Kill-Switch disarmed...${C_RESET}"
+    launchctl disable system/com.vpnguard.pf 2>/dev/null || true
+    launchctl disable system/com.vpnguard.singbox 2>/dev/null || true
+    launchctl bootout system/com.vpnguard.pf 2>/dev/null || true
+    launchctl bootout system/com.vpnguard.singbox 2>/dev/null || true
+else
+    echo -e "${C_BOLD}[9/9] Bootstrapping daemons and arming Fail-Closed PF Kill-Switch...${C_RESET}"
+    printf 'on\n' > "${DESIRED_STATE_FILE}"
+    chown root:wheel "${DESIRED_STATE_FILE}"
+    chmod 644 "${DESIRED_STATE_FILE}"
 
-launchctl kickstart -k system/com.vpnguard.xray 2>/dev/null || true
-launchctl kickstart -k system/com.vpnguard.singbox 2>/dev/null || true
+    launchctl enable system/com.vpnguard.pf 2>/dev/null || true
+    launchctl enable system/com.vpnguard.xray 2>/dev/null || true
+    launchctl enable system/com.vpnguard.singbox 2>/dev/null || true
 
-/usr/local/libexec/vpnguard-pf-boot.sh on
-/usr/local/bin/vpnguard dns-sync || true
+    launchctl bootout system/com.vpnguard.pf 2>/dev/null || true
+    launchctl bootstrap system /Library/LaunchDaemons/com.vpnguard.pf.plist 2>/dev/null || launchctl load -w /Library/LaunchDaemons/com.vpnguard.pf.plist 2>/dev/null || true
 
-# Persist backend source hash so update.sh knows when Touch ID elevation is required
+    /usr/local/libexec/vpnguard-pf-boot.sh on --no-dns-sync
+
+    launchctl bootout system/com.vpnguard.xray 2>/dev/null || true
+    launchctl bootstrap system /Library/LaunchDaemons/com.vpnguard.xray.plist 2>/dev/null || launchctl load -w /Library/LaunchDaemons/com.vpnguard.xray.plist 2>/dev/null || true
+
+    launchctl bootout system/com.vpnguard.singbox 2>/dev/null || true
+    launchctl bootstrap system /Library/LaunchDaemons/com.vpnguard.singbox.plist 2>/dev/null || launchctl load -w /Library/LaunchDaemons/com.vpnguard.singbox.plist 2>/dev/null || true
+
+    launchctl kickstart -k system/com.vpnguard.xray 2>/dev/null || true
+    launchctl kickstart -k system/com.vpnguard.singbox 2>/dev/null || true
+
+    /usr/local/bin/vpnguard dns-sync || true
+fi
+
+# Persist backend source hash so update.sh & GitHubReleaseUpdater match identically
 (
     cd "${SCRIPT_DIR}"
     find src bin install.sh -type f \
         ! -name 'vpnguard-xray' ! -name 'vpnguard-exec' \
+        ! -name 'xray.json' ! -name 'servers.json' \
         ! -path '*/__pycache__/*' ! -name '*.pyc' ! -name '.DS_Store' \
         -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}' > /usr/local/etc/vpnguard/backend.sha256
 )

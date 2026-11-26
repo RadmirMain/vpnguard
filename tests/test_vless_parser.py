@@ -361,6 +361,13 @@ class TestVlessParser(unittest.TestCase):
         self.assertEqual(migrated["name"], "Основной сервер")
         self.assertEqual(migrated["port"], 8443)
 
+    def test_resolve_host_ipv4_returns_empty_on_failure(self):
+        """resolve_host_ipv4 must never return raw hostnames or invalid IPv4 strings."""
+        self.assertEqual(vpnguard.resolve_host_ipv4("203.0.113.10"), ["203.0.113.10"])
+        self.assertEqual(vpnguard.resolve_host_ipv4("999.999.999.999"), [])
+        self.assertEqual(vpnguard.resolve_host_ipv4("nonexistent.invalid"), [])
+        self.assertEqual(vpnguard.resolve_host_ipv4(""), [])
+
 
 if __name__ == "__main__":
     unittest.main()

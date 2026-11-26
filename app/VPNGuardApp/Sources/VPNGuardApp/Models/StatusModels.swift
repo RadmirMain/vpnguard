@@ -1,5 +1,33 @@
 import Foundation
 
+public enum ExitIPState: Equatable {
+    case idle
+    case loading
+    case resolved(String)
+    case failed
+}
+
+public enum ProtectionState: Equatable {
+    case off
+    case turningOn
+    case on(exitIP: ExitIPState)
+    case turningOff
+
+    public var isProtectionActive: Bool {
+        if case .on = self { return true }
+        return false
+    }
+
+    public var isTogglingPower: Bool {
+        self == .turningOn || self == .turningOff
+    }
+
+    public var isResolvingExitIP: Bool {
+        if case .on(.loading) = self { return true }
+        return false
+    }
+}
+
 public struct DaemonProcessInfo: Codable, Equatable {
     public let running: Bool
     public let pid: Int?

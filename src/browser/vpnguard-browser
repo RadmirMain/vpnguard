@@ -45,24 +45,31 @@ if [[ -n "${EXISTING_PIDS}" ]]; then
     done
 fi
 
-# 3. Locate Chromium Mach-O binary
+# 3. Locate Chromium Mach-O binary in /Applications and ~/Applications (no arbitrary env override for GID 888 safety)
 CHROME_BIN=""
-for cand in \
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \
-    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
-    "/Applications/Chromium.app/Contents/MacOS/Chromium"; do
-    if [[ -f "${cand}" ]]; then
-        CHROME_BIN="${cand}"
-        break
-    fi
+for app_dir in "/Applications" "${HOME}/Applications"; do
+    for rel in \
+        "Google Chrome.app/Contents/MacOS/Google Chrome" \
+        "Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary" \
+        "Brave Browser.app/Contents/MacOS/Brave Browser" \
+        "Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
+        "Chromium.app/Contents/MacOS/Chromium" \
+        "Ungoogled Chromium.app/Contents/MacOS/Chromium" \
+        "Vivaldi.app/Contents/MacOS/Vivaldi" \
+        "Arc.app/Contents/MacOS/Arc"; do
+        cand="${app_dir}/${rel}"
+        if [[ -x "${cand}" ]]; then
+            CHROME_BIN="${cand}"
+            break 2
+        fi
+    done
 done
 
 # Strict Fail-Closed: Never fallback to open -a / Safari as it escapes GID 888 sandbox
 if [[ -z "${CHROME_BIN}" ]]; then
-    echo "[!] VPNGuard Browser Fatal: No Chromium-based browser found on system!" >&2
+    echo "[!] VPNGuard Browser Fatal: No Chromium-based browser found in /Applications or ~/Applications!" >&2
     echo "[!] Fallback to Safari / open is strictly prohibited to prevent IP/DNS leaks." >&2
-    echo "[!] Please install Google Chrome, Brave, Edge, or Chromium." >&2
+    echo "[!] Please install Chrome, Brave, Edge, Arc, Vivaldi, or Chromium (e.g. brew install --cask brave-browser)." >&2
     exit 1
 fi
 

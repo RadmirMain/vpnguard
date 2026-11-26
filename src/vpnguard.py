@@ -39,6 +39,7 @@ import ipaddress
 import grp
 import pwd
 import struct
+import tempfile
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Optional, Tuple, List, Callable
@@ -71,6 +72,7 @@ SINGBOX_CONF_PATH = "/usr/local/etc/vpnguard/sing-box.json"
 XRAY_CONF_PATH = "/usr/local/etc/vpnguard/xray.json"
 SERVERS_FILE_PATH = "/usr/local/etc/vpnguard/servers.json"
 ACTIVE_SERVER_META_PATH = "/usr/local/etc/vpnguard/active_server.json"
+DESIRED_STATE_PATH = "/var/db/vpnguard/desired_state"
 DNS_BACKUP_PATH = "/usr/local/etc/vpnguard/dns_backup.json"
 API_SECRET_PATH = "/usr/local/etc/vpnguard/api_secret"
 PF_ANCHOR_FILE = "/etc/pf.anchors/vpnguard"
@@ -136,6 +138,58 @@ RU_DIRECT_DOMAINS: List[str] = [
     "vk.com", "gosuslugi.ru", "tbank.ru", "sber.ru", "sberbank.ru",
     "ozon.ru", "wildberries.ru", "kinopoisk.ru", "avito.ru"
 ]
+
+AI_PROXY_DOMAINS: List[str] = [
+    "anthropic.com", "claude.ai", "openai.com", "chatgpt.com",
+    "oaistatic.com", "oaiusercontent.com", "cursor.sh", "cursor.com",
+    "github.com", "githubusercontent.com", "perplexity.ai",
+    "deepseek.com", "v0.dev", "groq.com", "cerebras.ai", "poe.com"
+]
+
+
+def read_desired_state(state_path: str = DESIRED_STATE_PATH) -> str:
+    """Read persistent desired protection state ('on' or 'off'); defaults to 'on'."""
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                val = f.read().strip().lower()
+            if val in ("on", "off"):
+                return val
+        except Exception:
+            pass
+    return "on"
+
+
+def write_desired_state(state: str, state_path: str = DESIRED_STATE_PATH) -> None:
+    """Persist desired protection state ('on' or 'off') cleanly."""
+    clean = state.strip().lower()
+    if clean not in ("on", "off"):
+        raise ValueError(f"Invalid desired_state: {state}")
+    atomic_write_text(state_path, f"{clean}\n", mode=0o644)
+
+
+def _set_launchd_service_enabled(service_target: str, enabled: bool) -> None:
+    """Enable or disable a system LaunchDaemon target via launchctl."""
+    subcmd = "enable" if enabled else "disable"
+    subprocess.run(["launchctl", subcmd, service_target], capture_output=True)
+
+
+def _write_private_validation_file(prefix: str, payload: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Create a private 0700 temp directory (inside /usr/local/etc/vpnguard when root)
+    and write a 0600 JSON file inside it so secrets never leak to /tmp with 0644.
+    """
+    parent_dir: Optional[str] = None
+    if os.geteuid() == 0 and os.path.isdir("/usr/local/etc/vpnguard"):
+        parent_dir = "/usr/local/etc/vpnguard"
+    tmp_dir = tempfile.mkdtemp(prefix=prefix, dir=parent_dir)
+    os.chmod(tmp_dir, 0o700)
+    tmp_path = os.path.join(tmp_dir, "config.json")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    os.chmod(tmp_path, 0o600)
+    return tmp_dir, tmp_path
 
 
 def load_config() -> Dict[str, Any]:
@@ -837,6 +891,59 @@ def get_or_create_api_secret(secret_path: str = API_SECRET_PATH) -> str:
     return token
 
 
+def compile_domain_rules(rules: Dict[str, Any]) -> List[Tuple[str, str, bool]]:
+    """
+    Compile user domain rules and enabled presets into a single specificity-sorted list of (domain, action, is_user).
+    Order guarantees:
+    1. Higher DNS label specificity wins (e.g. local.example.com > example.com > .ru).
+    2. Longer normalized suffix wins on equal label count.
+    3. Explicit user rules take precedence over presets on equal specificity.
+    4. Equal specificity/source breaks ties fail-safe: block > proxy > direct.
+    """
+    domains = rules.get("domains", [])
+    presets = rules.get("presets", {})
+    action_rank = {"block": 0, "proxy": 1, "direct": 2}
+
+    candidates: List[Tuple[Tuple[int, int, int, int, str], str, str, str, bool]] = []
+
+    def add_entry(raw_dom: str, raw_action: str, is_user: bool) -> None:
+        dom = raw_dom.strip()
+        if not dom:
+            return
+        action = raw_action if raw_action in action_rank else "proxy"
+        norm = dom.lower().lstrip(".")
+        if not norm:
+            return
+        labels = len([p for p in norm.split(".") if p])
+        source_rank = 0 if is_user else 1
+        sort_key = (-labels, source_rank, -len(norm), action_rank[action], norm)
+        candidates.append((sort_key, norm, dom, action, is_user))
+
+    for d in domains:
+        if not d.get("enabled", True):
+            continue
+        add_entry(str(d.get("domain", "")), str(d.get("action", "proxy")), is_user=True)
+
+    if presets.get("aiServicesProxy", True):
+        for dom in AI_PROXY_DOMAINS:
+            add_entry(dom, "proxy", is_user=False)
+
+    if presets.get("ruDirect", True):
+        for dom in RU_DIRECT_DOMAINS:
+            add_entry(dom, "direct", is_user=False)
+
+    candidates.sort(key=lambda item: item[0])
+
+    compiled: List[Tuple[str, str, bool]] = []
+    seen_norms: set = set()
+    for _, norm, dom, action, is_user in candidates:
+        if norm in seen_norms:
+            continue
+        seen_norms.add(norm)
+        compiled.append((dom, action, is_user))
+    return compiled
+
+
 def build_singbox_config(rules: Dict[str, Any], relay_ip: Optional[Any] = None) -> Dict[str, Any]:
     """
     Compile high-level rules into full sing-box JSON configuration.
@@ -846,8 +953,8 @@ def build_singbox_config(rules: Dict[str, Any], relay_ip: Optional[Any] = None) 
     3. reject QUIC (if preset blockQuic)
     4. private IP direct
     5. apps (by process_path_regex)
-    6. domains
-    7. presets (aiServicesProxy, ruDirect, reject UDP)
+    6. specificity-sorted domains (shared across dns.rules & route.rules)
+    7. reject remaining UDP
     8. final: xray-upstream
     """
     relay_ips_list: List[str] = []
@@ -864,48 +971,35 @@ def build_singbox_config(rules: Dict[str, Any], relay_ip: Optional[Any] = None) 
     api_secret = get_or_create_api_secret()
 
     apps = rules.get("apps", [])
-    domains = rules.get("domains", [])
     presets = rules.get("presets", {})
+    compiled_domains = compile_domain_rules(rules)
 
-    # Extract user explicit domains by action
-    user_proxy_domains = [
-        d["domain"].strip() for d in domains
-        if d.get("enabled", True) and d.get("action") == "proxy" and d.get("domain", "").strip()
-    ]
-    user_direct_domains = [
-        d["domain"].strip() for d in domains
-        if d.get("enabled", True) and d.get("action") == "direct" and d.get("domain", "").strip()
-    ]
-
-    ru_dns_domains = RU_DIRECT_DOMAINS
-    ai_dns_domains = [
-        "anthropic.com", "claude.ai", "openai.com", "chatgpt.com",
-        "oaistatic.com", "oaiusercontent.com", "cursor.sh", "cursor.com",
-        "github.com", "githubusercontent.com", "perplexity.ai",
-        "deepseek.com", "v0.dev", "groq.com", "cerebras.ai", "poe.com"
-    ]
-
-    # DNS routing rules (strict priority: User Proxy -> User Direct -> ruDirect -> aiProxy -> AAAA reject)
+    # DNS routing rules built from the same specificity-sorted list as route.rules
     dns_rules: List[Dict[str, Any]] = []
+    cur_dns_key: Optional[Tuple[str, str, bool]] = None
+    cur_dns_batch: List[str] = []
 
-    # 1. User proxy domains (Highest priority -> dns-remote via DoH tunnel)
-    # CRITICAL: Placed ABOVE ruDirect to prevent DNS leaks for custom .ru proxy domains!
-    if user_proxy_domains:
-        dns_rules.append({"domain_suffix": user_proxy_domains, "server": "dns-remote"})
+    def flush_dns_batch() -> None:
+        nonlocal cur_dns_key, cur_dns_batch
+        if cur_dns_key and cur_dns_batch:
+            kind, val, _ = cur_dns_key
+            dns_rules.append({"domain_suffix": cur_dns_batch, kind: val})
+        cur_dns_key = None
+        cur_dns_batch = []
 
-    # 2. User direct domains (dns-direct via local resolver)
-    if user_direct_domains:
-        dns_rules.append({"domain_suffix": user_direct_domains, "server": "dns-direct"})
+    for dom, action, is_user in compiled_domains:
+        kind, val = (
+            ("action", "reject") if action == "block"
+            else (("server", "dns-direct") if action == "direct" else ("server", "dns-remote"))
+        )
+        batch_key = (kind, val, is_user)
+        if batch_key != cur_dns_key:
+            flush_dns_batch()
+            cur_dns_key = batch_key
+        cur_dns_batch.append(dom)
+    flush_dns_batch()
 
-    # 3. ruDirect preset
-    if presets.get("ruDirect", True):
-        dns_rules.append({"domain_suffix": ru_dns_domains, "server": "dns-direct"})
-
-    # 4. aiServicesProxy preset
-    if presets.get("aiServicesProxy", True):
-        dns_rules.append({"domain_suffix": ai_dns_domains, "server": "dns-remote"})
-
-    # 5. Block AAAA / IPv6 DNS queries
+    # Block AAAA / IPv6 DNS queries
     dns_rules.append({"query_type": ["AAAA"], "action": "reject"})
 
     # 2. Route rules
@@ -938,29 +1032,10 @@ def build_singbox_config(rules: Dict[str, Any], relay_ip: Optional[Any] = None) 
         else:
             route_rules.append({"process_path": [bp], "outbound": outbound})
 
-    # Domain rules
-    for d in domains:
-        if not d.get("enabled", True):
-            continue
-        dom = d.get("domain", "").strip()
-        if not dom:
-            continue
-        action = d.get("action", "proxy")
+    # Domain rules (same specificity-sorted order as dns.rules)
+    for dom, action, _ in compiled_domains:
         outbound = "xray-upstream" if action == "proxy" else ("direct" if action == "direct" else "block")
         route_rules.append({"domain_suffix": [dom], "outbound": outbound})
-
-    # Presets
-    if presets.get("aiServicesProxy", True):
-        ai_list = [
-            "anthropic.com", "claude.ai", "openai.com", "chatgpt.com",
-            "oaistatic.com", "oaiusercontent.com", "cursor.sh", "cursor.com",
-            "github.com", "githubusercontent.com", "perplexity.ai",
-            "deepseek.com", "v0.dev", "groq.com", "cerebras.ai", "poe.com"
-        ]
-        route_rules.append({"domain_suffix": ai_list, "outbound": "xray-upstream"})
-
-    if presets.get("ruDirect", True):
-        route_rules.append({"domain_suffix": RU_DIRECT_DOMAINS, "outbound": "direct"})
 
     # Block generic UDP leak
     route_rules.append({"network": "udp", "action": "reject"})
@@ -1348,7 +1423,7 @@ def _disable_protection_core(quiet: bool = False) -> None:
 
 
 def cmd_on(args: argparse.Namespace) -> int:
-    """Start VPNGuard services (xray + sing-box), arm fail-closed PF kill-switch, and lock DNS."""
+    """Prepare configs, arm fail-closed PF kill-switch, start xray + sing-box, and lock DNS."""
     if os.geteuid() != 0:
         print(f"{C_RED}[!] 'vpnguard on' requires root privileges. Run: sudo vpnguard on{C_RESET}", file=sys.stderr)
         return 1
@@ -1368,12 +1443,87 @@ def cmd_on(args: argparse.Namespace) -> int:
     except Exception:
         pass
 
-    # 1. Start xray LaunchDaemon
-    print(f"{C_BOLD}[1/4] Starting vpnguard-xray LaunchDaemon (GID 889)...{C_RESET}")
+    # 1. Resolve active relay and prepare pf.egress.conf + sing-box.json BEFORE arming PF
+    print(f"{C_BOLD}[1/5] Preparing relay egress & sing-box configuration...{C_RESET}")
+    current_rules = DEFAULT_RULES
+    if os.path.exists(RULES_FILE_PATH):
+        try:
+            with open(RULES_FILE_PATH, "r", encoding="utf-8") as rf:
+                current_rules = json.load(rf)
+        except Exception:
+            pass
+
+    relay_ips, relay_port = get_active_relay_endpoint()
+    if not relay_ips:
+        active_host = ""
+        if os.path.exists(SERVERS_FILE_PATH):
+            try:
+                with open(SERVERS_FILE_PATH, "r", encoding="utf-8") as sf:
+                    s_store = json.load(sf)
+                act_id = s_store.get("activeId")
+                for s in s_store.get("servers", []):
+                    if s.get("id") == act_id:
+                        active_host = str(s.get("host", "")).strip()
+                        relay_port = int(s.get("port", 443))
+                        break
+            except Exception:
+                pass
+        if not active_host and os.path.exists(XRAY_CONF_PATH):
+            try:
+                with open(XRAY_CONF_PATH, "r", encoding="utf-8") as xf:
+                    active_host, relay_port = _extract_xray_endpoint(json.load(xf))
+            except Exception:
+                pass
+        if active_host:
+            relay_ips = resolve_ipv4_direct_via_gid890(active_host)
+
+    if relay_ips:
+        try:
+            write_pf_egress_file(relay_ips, relay_port, PF_EGRESS_FILE)
+        except Exception as e:
+            print(f"    {C_RED}[!] Error updating pf.egress.conf: {e}{C_RESET}", file=sys.stderr)
+            return 1
+
+    try:
+        sb_cfg = build_singbox_config(current_rules, relay_ip=relay_ips or None)
+        tmp_sb = f"{SINGBOX_CONF_PATH}.tmp_{os.getpid()}"
+        atomic_write_text(tmp_sb, json.dumps(sb_cfg, indent=2, ensure_ascii=False), mode=0o600)
+        sb_bin = SINGBOX_BIN if os.path.exists(SINGBOX_BIN) else "sing-box"
+        res_sb = subprocess.run([sb_bin, "check", "-c", tmp_sb], capture_output=True, text=True)
+        if res_sb.returncode == 0:
+            os.replace(tmp_sb, SINGBOX_CONF_PATH)
+            os.chmod(SINGBOX_CONF_PATH, 0o600)
+        else:
+            if os.path.exists(tmp_sb):
+                os.remove(tmp_sb)
+            err = res_sb.stderr.strip() or res_sb.stdout.strip()
+            print(f"    {C_RED}[!] sing-box config check failed: {err}{C_RESET}", file=sys.stderr)
+            return 1
+    except Exception as e:
+        print(f"    {C_RED}[!] Error rebuilding sing-box.json: {e}{C_RESET}", file=sys.stderr)
+        return 1
+    sync_active_server_metadata()
+
+    # Persist desired_state='on' strictly AFTER config validation and BEFORE calling vpnguard-pf-boot.sh on
+    write_desired_state("on")
+
+    # 2. Arm PF anchor rules BEFORE starting daemons (Fail-Closed)
+    print(f"\n{C_BOLD}[2/5] Arming System Fail-Closed PF Kill-Switch...{C_RESET}")
+    _set_launchd_service_enabled("system/com.vpnguard.pf", True)
+    res_pf = subprocess.run(["/usr/local/libexec/vpnguard-pf-boot.sh", "on", "--no-dns-sync"], capture_output=True, text=True)
+    if res_pf.returncode == 0:
+        print(f"    {C_GREEN}✓ PF Kill-Switch armed successfully (Fail-Closed active){C_RESET}")
+    else:
+        err_pf = res_pf.stderr.strip() or res_pf.stdout.strip() or "vpnguard-pf-boot.sh failed"
+        print(f"    {C_RED}[!] Error arming PF: {err_pf}{C_RESET}", file=sys.stderr)
+        return 1
+
+    # 3. Start xray LaunchDaemon (GID 889)
+    print(f"\n{C_BOLD}[3/5] Starting vpnguard-xray LaunchDaemon (GID 889)...{C_RESET}")
+    _set_launchd_service_enabled("system/com.vpnguard.xray", True)
     subprocess.run(["launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.vpnguard.xray.plist"], capture_output=True)
     subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.xray"], capture_output=True)
 
-    # Wait for SOCKS5 port
     xray_ready = False
     for _ in range(10):
         if check_port_listening("127.0.0.1", 18088, timeout=0.5):
@@ -1385,43 +1535,14 @@ def cmd_on(args: argparse.Namespace) -> int:
     if xray["running"] and xray_ready:
         print(f"    {C_GREEN}✓ vpnguard-xray is running (PID {xray['pid']}, GID {xray.get('group', '889')}){C_RESET}")
     else:
-        print(f"    {C_YELLOW}[!] Warning: vpnguard-xray is starting up...{C_RESET}")
+        print(f"    {C_RED}[!] vpnguard-xray failed to become ready (PF Kill-Switch remains armed){C_RESET}", file=sys.stderr)
 
-    # 1.5. Rebuild sing-box.json (mode 0600) and pf.egress.conf from active server & rules.json
-    current_rules = DEFAULT_RULES
-    if os.path.exists(RULES_FILE_PATH):
-        try:
-            with open(RULES_FILE_PATH, "r", encoding="utf-8") as rf:
-                current_rules = json.load(rf)
-        except Exception:
-            pass
-    relay_ips, relay_port = get_active_relay_endpoint()
-    if relay_ips:
-        try:
-            write_pf_egress_file(relay_ips, relay_port, PF_EGRESS_FILE)
-        except Exception as e:
-            print(f"    {C_YELLOW}[!] Warning updating pf.egress.conf: {e}{C_RESET}")
-    try:
-        sb_cfg = build_singbox_config(current_rules, relay_ip=relay_ips or None)
-        tmp_sb = f"{SINGBOX_CONF_PATH}.tmp_{os.getpid()}"
-        atomic_write_text(tmp_sb, json.dumps(sb_cfg, indent=2, ensure_ascii=False), mode=0o600)
-        sb_bin = SINGBOX_BIN if os.path.exists(SINGBOX_BIN) else "sing-box"
-        res_sb = subprocess.run([sb_bin, "check", "-c", tmp_sb], capture_output=True, text=True)
-        if res_sb.returncode == 0:
-            os.replace(tmp_sb, SINGBOX_CONF_PATH)
-            os.chmod(SINGBOX_CONF_PATH, 0o600)
-        elif os.path.exists(tmp_sb):
-            os.remove(tmp_sb)
-    except Exception as e:
-        print(f"    {C_YELLOW}[!] Warning rebuilding sing-box.json: {e}{C_RESET}")
-    sync_active_server_metadata()
-
-    # 2. Start sing-box LaunchDaemon
-    print(f"\n{C_BOLD}[2/4] Starting vpnguard-singbox LaunchDaemon (GID 890)...{C_RESET}")
+    # 4. Start sing-box LaunchDaemon (GID 890)
+    print(f"\n{C_BOLD}[4/5] Starting vpnguard-singbox LaunchDaemon (GID 890)...{C_RESET}")
+    _set_launchd_service_enabled("system/com.vpnguard.singbox", True)
     subprocess.run(["launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.vpnguard.singbox.plist"], capture_output=True)
     subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True)
 
-    # Wait for utun99
     utun_ready = False
     for _ in range(15):
         utun = get_utun_status()
@@ -1434,34 +1555,35 @@ def cmd_on(args: argparse.Namespace) -> int:
     if singbox["running"] and utun_ready:
         print(f"    {C_GREEN}✓ vpnguard-singbox is running (PID {singbox['pid']}, interface utun99, IP 172.19.0.1){C_RESET}")
     else:
-        print(f"    {C_YELLOW}[!] Note: vpnguard-singbox initialization in progress{C_RESET}")
+        print(f"    {C_RED}[!] vpnguard-singbox failed to bring up utun99 (PF Kill-Switch remains armed){C_RESET}", file=sys.stderr)
 
-    # 3. Arm PF anchor rules
-    print(f"\n{C_BOLD}[3/4] Arming System Fail-Closed PF Kill-Switch...{C_RESET}")
-    res_pf = subprocess.run(["/usr/local/libexec/vpnguard-pf-boot.sh", "on"], capture_output=True, text=True)
-    if res_pf.returncode == 0:
-        print(f"    {C_GREEN}✓ PF Kill-Switch armed successfully (Fail-Closed active){C_RESET}")
-    else:
-        print(f"    {C_RED}[!] Error arming PF: {res_pf.stderr.strip()}{C_RESET}")
-
-    # 4. Lock hardware DNS to 1.1.1.1 (routed into utun99 hijack-dns) & flush mDNSResponder
-    print(f"\n{C_BOLD}[4/4] Syncing system DNS & flushing mDNSResponder cache...{C_RESET}")
+    # 5. Lock hardware DNS to 1.1.1.1 (routed into utun99 hijack-dns) & flush mDNSResponder
+    print(f"\n{C_BOLD}[5/5] Syncing system DNS & flushing mDNSResponder cache...{C_RESET}")
     dns_ok, dns_msg = sync_system_dns()
     if dns_ok:
         print(f"    {C_GREEN}✓ {dns_msg}{C_RESET}")
     else:
         print(f"    {C_YELLOW}[!] DNS sync note: {dns_msg}{C_RESET}")
 
-    return cmd_status(args)
+    if not (xray["running"] and xray_ready and singbox["running"] and utun_ready):
+        print(f"{C_RED}[!] PF Kill-Switch is active, but one or more tunnel daemons failed to start.{C_RESET}", file=sys.stderr)
+        return 1
+
+    fast_args = argparse.Namespace(**vars(args))
+    fast_args.fast = True
+    return cmd_status(fast_args)
 
 
 def cmd_off(args: argparse.Namespace) -> int:
-    """Safely disable kill-switch, stop sing-box, and restore original system DNS."""
+    """Safely disable kill-switch, persist desired_state=off, stop sing-box, and restore DNS."""
     if os.geteuid() != 0:
         print(f"{C_RED}[!] 'vpnguard off' requires root privileges. Run: sudo vpnguard off{C_RESET}", file=sys.stderr)
         return 1
 
     _clear_pause_state(kill_watcher=True)
+    write_desired_state("off")
+    _set_launchd_service_enabled("system/com.vpnguard.pf", False)
+    _set_launchd_service_enabled("system/com.vpnguard.singbox", False)
     _disable_protection_core(quiet=False)
 
     print(f"\n{C_BOLD}{C_GREEN}✅ Direct internet access restored. Captive portal login is now possible.{C_RESET}")
@@ -1715,7 +1837,7 @@ def cmd_dns_sync(args: argparse.Namespace) -> int:
 
     pf_info = get_pf_status()
     sb_proc = get_singbox_process_status()
-    if not (pf_info["enabled"] and pf_info["anchor_loaded"] and sb_proc["running"]):
+    if not (pf_info["enabled"] and pf_info["anchor_loaded"] and (sb_proc["running"] or read_desired_state() == "on")):
         print(json.dumps({"status": "skipped", "message": "Protection is not active"}))
         return 0
 
@@ -1855,10 +1977,15 @@ def cmd_rules_apply(args: argparse.Namespace) -> int:
 
 
 def resolve_host_ipv4(host: str) -> List[str]:
-    """Resolve host to unique IPv4 addresses. If already IPv4, returns [host]."""
+    """Resolve host to unique IPv4 addresses. Returns [] on failure (never returns raw hostname)."""
     host = host.strip()
-    if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", host):
-        return [host]
+    if not host:
+        return []
+    try:
+        ip_obj = ipaddress.ip_address(host)
+        return [host] if ip_obj.version == 4 else []
+    except ValueError:
+        pass
     try:
         addr_info = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
         ips = list(dict.fromkeys([res[4][0] for res in addr_info if res[4][0]]))
@@ -1866,22 +1993,20 @@ def resolve_host_ipv4(host: str) -> List[str]:
             return ips
     except Exception as e:
         print(f"[!] Warning resolving host '{host}': {e}", file=sys.stderr)
-    return [host]
+    return []
 
 
 def validate_xray_config(xray_data: Dict[str, Any]) -> Tuple[bool, str]:
     """Validate Xray JSON configuration using vpnguard-xray run -test."""
     xray_bin = XRAY_BIN if os.path.exists(XRAY_BIN) else "xray"
-    tmp_path = f"/tmp/xray_val_{os.getpid()}_{secrets.token_hex(4)}.json"
+    tmp_dir: Optional[str] = None
     try:
         test_data = copy.deepcopy(xray_data)
         test_data["log"] = {
             "access": "none",
             "loglevel": "warning"
         }
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(test_data, f, indent=2)
-        os.chmod(tmp_path, 0o644)
+        tmp_dir, tmp_path = _write_private_validation_file("xray_val_", test_data)
 
         res = subprocess.run([xray_bin, "run", "-test", "-c", tmp_path], capture_output=True, text=True)
         if res.returncode == 0:
@@ -1892,9 +2017,9 @@ def validate_xray_config(xray_data: Dict[str, Any]) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Failed to execute Xray test binary: {e}"
     finally:
-        if os.path.exists(tmp_path):
+        if tmp_dir and os.path.exists(tmp_dir):
             try:
-                os.remove(tmp_path)
+                shutil.rmtree(tmp_dir, ignore_errors=True)
             except Exception:
                 pass
 
@@ -2383,20 +2508,18 @@ def activate_server(server_id: str, store_path: Optional[str] = None) -> Tuple[b
             pass
 
     updated_sb = build_singbox_config(current_rules, relay_ip=resolved_ips)
-    tmp_sb = f"/tmp/singbox_val_{os.getpid()}_{secrets.token_hex(4)}.json"
+    tmp_sb_dir: Optional[str] = None
     try:
-        with open(tmp_sb, "w", encoding="utf-8") as sbf:
-            json.dump(updated_sb, sbf, indent=2, ensure_ascii=False)
-        os.chmod(tmp_sb, 0o600)
+        tmp_sb_dir, tmp_sb = _write_private_validation_file("singbox_val_", updated_sb)
         sb_bin = SINGBOX_BIN if os.path.exists(SINGBOX_BIN) else "sing-box"
         res_sb = subprocess.run([sb_bin, "check", "-c", tmp_sb], capture_output=True, text=True)
         if res_sb.returncode != 0:
             err = res_sb.stderr.strip() or res_sb.stdout.strip()
             return False, f"Sing-box validation failed: {err}"
     finally:
-        if os.path.exists(tmp_sb):
+        if tmp_sb_dir and os.path.exists(tmp_sb_dir):
             try:
-                os.remove(tmp_sb)
+                shutil.rmtree(tmp_sb_dir, ignore_errors=True)
             except Exception:
                 pass
 
@@ -2798,8 +2921,13 @@ def _run_in_gid890_worker(fn: Callable[[], Any]) -> Any:
                 os.setgroups([890])
                 os.setgid(890)
                 os.setuid(nobody_uid)
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    os.write(write_fd, json.dumps({"ok": False, "error": f"GID 890 privilege drop failed: {e}"}).encode("utf-8"))
+                    os.close(write_fd)
+                except Exception:
+                    pass
+                os._exit(1)
             payload = json.dumps({"ok": True, "result": fn()}, ensure_ascii=False).encode("utf-8")
             os.write(write_fd, payload)
         except Exception as e:

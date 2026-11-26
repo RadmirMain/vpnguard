@@ -219,6 +219,11 @@ private struct AppUpdateSheetView: View {
     @ObservedObject var vm: VPNGuardViewModel
     @ObservedObject private var releaseUpdater = GitHubReleaseUpdater.shared
     @State private var showDevTools: Bool = false
+    @State private var showGitHubEmptyInfo: Bool = false
+
+    private var preferLocalChannel: Bool {
+        releaseUpdater.status == .noReleasesYet && vm.updateCheckResult != nil
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -273,90 +278,49 @@ private struct AppUpdateSheetView: View {
                     }
                 }
 
-                // GitHub Releases Card (Primary User Flow)
-                gitHubReleaseCard
+                if preferLocalChannel {
+                    localRepoPrimaryCard
 
-                // Developer Local Repo Section
-                VGCard(padding: 14) {
-                    DisclosureGroup(isExpanded: $showDevTools) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack(spacing: 8) {
-                                Text(vm.sourceRepoPath)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 7)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(VGTheme.surfaceLevel2, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
-
-                                Button("Выбрать…") {
-                                    chooseRepoFolder()
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(vm.isUpdatingApp)
-
-                                Button {
-                                    Task { await vm.checkForUpdates() }
-                                } label: {
-                                    if vm.isCheckingUpdates {
-                                        ProgressView().controlSize(.small)
-                                    } else {
-                                        Image(systemName: "arrow.clockwise")
-                                    }
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(vm.isCheckingUpdates || vm.isUpdatingApp)
+                    VGCard(padding: 14) {
+                        DisclosureGroup(isExpanded: $showGitHubEmptyInfo) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("Релизы на GitHub ещё не опубликованы.")
+                                    .font(.system(size: 12, weight: .medium))
+                                Text("Создайте и отправьте тег (например, git tag v3.0.1 && git push --tags), чтобы активировать автообновление через GitHub Releases.")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
                             }
                             .padding(.top, 6)
-
-                            if let check = vm.updateCheckResult {
-                                HStack(spacing: 8) {
-                                    VGStatusBadge(
-                                        check.frontendUpdateNeeded ? "Приложение: изменено" : "Приложение: актуально",
-                                        tone: check.frontendUpdateNeeded ? .warning : .protected
-                                    )
-                                    VGStatusBadge(
-                                        check.backendUpdateNeeded ? "Бэкенд: нужен Touch ID" : "Бэкенд: актуален",
-                                        tone: check.backendUpdateNeeded ? .warning : .protected
-                                    )
-                                    if !check.headCommit.isEmpty {
-                                        VGStatusBadge("HEAD \(check.headCommit)", tone: .neutral)
-                                    }
-                                }
-                            }
-
+                        } label: {
                             HStack(spacing: 8) {
-                                Button {
-                                    Task { await vm.triggerAppUpdate(forceApp: false, forceBackend: true) }
-                                } label: {
-                                    Label("Переустановить демоны (Touch ID)", systemImage: "wrench.and.screwdriver")
-                                        .font(.system(size: 11, weight: .medium))
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .disabled(vm.isUpdatingApp)
-
-                                Spacer()
-
-                                Button("Пересобрать локально") {
-                                    Task { await vm.triggerAppUpdate(forceApp: true, forceBackend: false) }
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .disabled(vm.isUpdatingApp)
+                                Image(systemName: "shippingbox")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                                Text("GitHub Releases (релизы не опубликованы)")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
                             }
                         }
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "hammer")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                            Text("Локальная пересборка из репозитория (для разработки)")
-                                .font(.system(size: 12, weight: .medium))
-                            Spacer()
-                            if vm.updateCheckResult?.updateAvailable == true {
-                                VGStatusBadge("Есть изменения", tone: .warning)
+                    }
+                } else {
+                    // GitHub Releases Card (Primary User Flow)
+                    gitHubReleaseCard
+
+                    // Developer Local Repo Section
+                    VGCard(padding: 14) {
+                        DisclosureGroup(isExpanded: $showDevTools) {
+                            localRepoControls
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "hammer")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                                Text("Локальная пересборка из репозитория (для разработки)")
+                                    .font(.system(size: 12, weight: .medium))
+                                Spacer()
+                                if vm.updateCheckResult?.updateAvailable == true {
+                                    VGStatusBadge("Есть изменения", tone: .warning)
+                                }
                             }
                         }
                     }
@@ -445,6 +409,107 @@ private struct AppUpdateSheetView: View {
         .task {
             await releaseUpdater.checkForRelease(silent: false)
             await vm.checkForUpdates()
+        }
+    }
+
+    private var localRepoPrimaryCard: some View {
+        let check = vm.updateCheckResult
+        let hasUpdates = check?.updateAvailable == true
+        let fetchFailed = check?.fetchFailed == true
+        return VGCard(
+            padding: 14,
+            accentBorder: hasUpdates ? VGTheme.accentPrimary.opacity(0.35) : nil
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Image(systemName: hasUpdates ? "arrow.triangle.2.circlepath.circle.fill" : (fetchFailed ? "exclamationmark.triangle.fill" : "checkmark.seal.fill"))
+                        .foregroundStyle(hasUpdates ? VGTheme.accentPrimary : (fetchFailed ? VGTheme.statusWarning : VGTheme.statusProtected))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(hasUpdates ? "Доступно локальное обновление" : (fetchFailed ? "Не удалось проверить origin (git fetch)" : "Локальная сборка актуальна"))
+                            .font(.system(size: 12, weight: .semibold))
+                        if let check {
+                            Text("Ветка HEAD \(check.headCommit.isEmpty ? "—" : check.headCommit) • новых коммитов: \(check.remoteAheadCount)")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                }
+                localRepoControls
+            }
+        }
+    }
+
+    private var localRepoControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text(vm.sourceRepoPath)
+                    .font(.system(size: 11, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(VGTheme.surfaceLevel2, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
+
+                Button("Выбрать…") {
+                    chooseRepoFolder()
+                }
+                .buttonStyle(.bordered)
+                .disabled(vm.isUpdatingApp)
+
+                Button {
+                    Task { await vm.checkForUpdates() }
+                } label: {
+                    if vm.isCheckingUpdates {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(vm.isCheckingUpdates || vm.isUpdatingApp)
+            }
+            .padding(.top, 4)
+
+            if let check = vm.updateCheckResult {
+                HStack(spacing: 8) {
+                    VGStatusBadge(
+                        check.frontendUpdateNeeded ? "Приложение: изменено" : "Приложение: актуально",
+                        tone: check.frontendUpdateNeeded ? .warning : .protected
+                    )
+                    VGStatusBadge(
+                        check.backendUpdateNeeded ? "Бэкенд: нужен Touch ID" : "Бэкенд: актуален",
+                        tone: check.backendUpdateNeeded ? .warning : .protected
+                    )
+                    if check.fetchFailed == true {
+                        VGStatusBadge("git fetch: ошибка сети", tone: .warning)
+                    } else if !check.headCommit.isEmpty {
+                        VGStatusBadge("HEAD \(check.headCommit)", tone: .neutral)
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    Task { await vm.triggerAppUpdate(forceApp: false, forceBackend: true) }
+                } label: {
+                    Label("Переустановить демоны (Touch ID)", systemImage: "wrench.and.screwdriver")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(vm.isUpdatingApp)
+
+                Spacer()
+
+                Button("Пересобрать локально") {
+                    Task { await vm.triggerAppUpdate(forceApp: true, forceBackend: false) }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(vm.isUpdatingApp)
+            }
         }
     }
 

@@ -62,6 +62,7 @@ public struct UpdateCheckResult: Codable, Equatable {
     public let currentBackendHash: String
     public let installedFrontendHash: String
     public let currentFrontendHash: String
+    public let fetchFailed: Bool?
 }
 
 public struct VlessParsedPreview: Equatable {

@@ -67,6 +67,7 @@ compute_backend_hash() {
         cd "${SCRIPT_DIR}"
         find src bin install.sh -type f \
             ! -name 'vpnguard-xray' ! -name 'vpnguard-exec' \
+            ! -name 'xray.json' ! -name 'servers.json' \
             ! -path '*/__pycache__/*' ! -name '*.pyc' ! -name '.DS_Store' \
             -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}'
     )
@@ -91,6 +92,7 @@ read_trimmed_file() {
 REMOTE_AHEAD_COUNT=0
 LOCAL_DIRTY=0
 GIT_HEAD_SHORT=""
+FETCH_FAILED=0
 
 if [[ -d "${SCRIPT_DIR}/.git" ]]; then
     cd "${SCRIPT_DIR}"
@@ -100,11 +102,11 @@ if [[ -d "${SCRIPT_DIR}/.git" ]]; then
     fi
     if [[ "${DO_PULL}" -eq 1 ]] && git remote get-url origin &>/dev/null; then
         if [[ "${CHECK_ONLY}" -eq 1 ]]; then
-            python3 -c '
+            if ! python3 -c '
 import os, subprocess, sys
 env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
 try:
-    subprocess.run(
+    res = subprocess.run(
         ["git", "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=5", "fetch", "--quiet", "origin"],
         env=env,
         stdout=subprocess.DEVNULL,
@@ -112,9 +114,12 @@ try:
         timeout=5,
         check=False,
     )
+    sys.exit(0 if res.returncode == 0 else 1)
 except Exception:
-    pass
-' 2>/dev/null || true
+    sys.exit(1)
+' 2>/dev/null; then
+                FETCH_FAILED=1
+            fi
             if git rev-parse --abbrev-ref '@{u}' &>/dev/null; then
                 REMOTE_AHEAD_COUNT="$(git rev-list --count 'HEAD..@{u}' 2>/dev/null || echo 0)"
             fi
@@ -166,8 +171,9 @@ print(json.dumps({
     "currentBackendHash": sys.argv[8][:12],
     "installedFrontendHash": sys.argv[9][:12],
     "currentFrontendHash": sys.argv[10][:12],
+    "fetchFailed": sys.argv[11] == "1",
 }, indent=2))
-' "${UPDATE_AVAILABLE}" "${NEEDS_BACKEND_UPDATE}" "${NEEDS_FRONTEND_UPDATE}" "${REMOTE_AHEAD_COUNT}" "${LOCAL_DIRTY}" "${GIT_HEAD_SHORT}" "${INSTALLED_BACKEND_HASH}" "${CURRENT_BACKEND_HASH}" "${INSTALLED_FRONTEND_HASH}" "${CURRENT_FRONTEND_HASH}"
+' "${UPDATE_AVAILABLE}" "${NEEDS_BACKEND_UPDATE}" "${NEEDS_FRONTEND_UPDATE}" "${REMOTE_AHEAD_COUNT}" "${LOCAL_DIRTY}" "${GIT_HEAD_SHORT}" "${INSTALLED_BACKEND_HASH}" "${CURRENT_BACKEND_HASH}" "${INSTALLED_FRONTEND_HASH}" "${CURRENT_FRONTEND_HASH}" "${FETCH_FAILED}"
     exit 0
 fi
 
@@ -180,6 +186,13 @@ fi
 
 STAGING_ROOT=""
 STAGED_APP=""
+BACKEND_STAGE_ROOT=""
+
+cleanup() {
+    [[ -n "${BACKEND_STAGE_ROOT}" ]] && rm -rf "${BACKEND_STAGE_ROOT}" || true
+    [[ -n "${STAGING_ROOT}" ]] && rm -rf "${STAGING_ROOT}" || true
+}
+trap cleanup EXIT
 
 if [[ "${NEEDS_FRONTEND_UPDATE}" -eq 1 ]]; then
     echo "==> [3/4] Building ${APP_BUNDLE_NAME} as user $(id -un)..."
@@ -203,11 +216,12 @@ if [[ "${NEEDS_FRONTEND_UPDATE}" -eq 1 ]]; then
     echo -n "APPL????" > "${STAGED_APP}/Contents/PkgInfo"
     printf '%s\n' "${CURRENT_FRONTEND_HASH}" > "${STAGED_APP}/Contents/Resources/frontend.sha256"
 
-    mkdir -p "${STAGED_APP}/Contents/Resources/backend"
+    mkdir -p "${STAGED_APP}/Contents/Resources/backend/libexec"
     cp "${SCRIPT_DIR}/install.sh" "${STAGED_APP}/Contents/Resources/backend/install.sh"
     chmod +x "${STAGED_APP}/Contents/Resources/backend/install.sh"
     rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='xray/xray.json' --exclude='servers.json' --exclude='.DS_Store' "${SCRIPT_DIR}/src" "${STAGED_APP}/Contents/Resources/backend/"
     rsync -a --exclude='.DS_Store' "${SCRIPT_DIR}/bin" "${STAGED_APP}/Contents/Resources/backend/"
+    clang -Wall -Wextra -Werror -O2 -arch arm64 -o "${STAGED_APP}/Contents/Resources/backend/libexec/vpnguard-exec" "${SCRIPT_DIR}/src/vpnguard_exec.c"
     printf '%s\n' "${CURRENT_BACKEND_HASH}" > "${STAGED_APP}/Contents/Resources/backend/backend.sha256"
 
     # Strip extended attributes strictly BEFORE ad-hoc codesign
@@ -219,16 +233,37 @@ fi
 
 if [[ "${NEEDS_BACKEND_UPDATE}" -eq 1 ]]; then
     echo "==> [3.5/4] Updating system backend via macOS Authorization (Touch ID / Password)..."
-    if ! osascript - "${SCRIPT_DIR}/install.sh" <<'APPLESCRIPT'
+    if [[ -n "${STAGED_APP}" && -x "${STAGED_APP}/Contents/Resources/backend/install.sh" ]]; then
+        BACKEND_INSTALLER="${STAGED_APP}/Contents/Resources/backend/install.sh"
+    else
+        # Stage outside TCC-protected folders (e.g. ~/Desktop) so osascript administrator shell can read it
+        BACKEND_STAGE_ROOT="$(mktemp -d "/tmp/vpnguard-backend.XXXXXX")"
+        cp "${SCRIPT_DIR}/install.sh" "${BACKEND_STAGE_ROOT}/install.sh"
+        chmod +x "${BACKEND_STAGE_ROOT}/install.sh"
+        rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='xray/xray.json' --exclude='servers.json' --exclude='.DS_Store' "${SCRIPT_DIR}/src" "${BACKEND_STAGE_ROOT}/"
+        rsync -a --exclude='.DS_Store' "${SCRIPT_DIR}/bin" "${BACKEND_STAGE_ROOT}/"
+        printf '%s\n' "${CURRENT_BACKEND_HASH}" > "${BACKEND_STAGE_ROOT}/backend.sha256"
+        BACKEND_INSTALLER="${BACKEND_STAGE_ROOT}/install.sh"
+    fi
+
+    if ! (cd / && osascript - "${BACKEND_INSTALLER}" <<'APPLESCRIPT'
 on run argv
     set installerPath to item 1 of argv
-    do shell script (quoted form of installerPath) & " --backend-only" with administrator privileges
+    do shell script "cd / && " & (quoted form of installerPath) & " --backend-only" with administrator privileges
 end run
 APPLESCRIPT
+    )
     then
-        [[ -n "${STAGING_ROOT}" ]] && rm -rf "${STAGING_ROOT}"
         echo "[!] Backend installation cancelled or failed." >&2
         exit 1
+    fi
+    if [[ -n "${BACKEND_STAGE_ROOT}" ]]; then
+        rm -rf "${BACKEND_STAGE_ROOT}"
+        BACKEND_STAGE_ROOT=""
+    fi
+
+    if pgrep -x vpnguard-xray >/dev/null 2>&1 || pgrep -x vpnguard-singbox >/dev/null 2>&1 || ifconfig utun99 >/dev/null 2>&1; then
+        echo "    [i] Active VPN detected: reconnect VPNGuard (Off -> On) to apply updated backend binaries/configs cleanly."
     fi
 else
     echo "    ✓ Backend files unchanged (${CURRENT_BACKEND_HASH:0:12}); Touch ID elevation skipped."
@@ -237,12 +272,24 @@ fi
 if [[ "${NEEDS_FRONTEND_UPDATE}" -eq 1 ]]; then
     echo "==> [4/4] Installing ${APP_BUNDLE_NAME} atomically..."
     if [[ -n "${FROM_APP_PID}" ]]; then
+        RELAUNCH_LOG_DIR="${HOME}/Library/Logs/VPNGuard"
+        mkdir -p "${RELAUNCH_LOG_DIR}"
+        RELAUNCH_LOG_FILE="${RELAUNCH_LOG_DIR}/update-relaunch.log"
+
         nohup /bin/bash -c '
             OLD_PID="$1"
             STAGING_ROOT="$2"
             STAGED_APP="$3"
             TARGET_APP="$4"
+            BACKUP_APP="/Applications/.VPNGuard.app.old.$$"
+            NEW_APP="/Applications/.VPNGuard.app.new.$$"
 
+            relaunch_cleanup() {
+                rm -rf "${NEW_APP}" "${STAGING_ROOT}" 2>/dev/null || true
+            }
+            trap relaunch_cleanup EXIT
+
+            # Wait up to 10s for graceful exit, then SIGTERM (3s), then SIGKILL (0.5s)
             for _ in $(seq 1 50); do
                 if ! kill -0 "${OLD_PID}" 2>/dev/null; then
                     break
@@ -251,25 +298,35 @@ if [[ "${NEEDS_FRONTEND_UPDATE}" -eq 1 ]]; then
             done
             if kill -0 "${OLD_PID}" 2>/dev/null; then
                 kill -TERM "${OLD_PID}" 2>/dev/null || true
-                for _ in $(seq 1 25); do
+                for _ in $(seq 1 15); do
                     if ! kill -0 "${OLD_PID}" 2>/dev/null; then
                         break
                     fi
                     sleep 0.2
                 done
             fi
+            if kill -0 "${OLD_PID}" 2>/dev/null; then
+                kill -KILL "${OLD_PID}" 2>/dev/null || true
+                sleep 0.5
+            fi
 
-            BACKUP_APP="/Applications/.VPNGuard.app.old.$$"
-            NEW_APP="/Applications/.VPNGuard.app.new.$$"
             rm -rf "${NEW_APP}" "${BACKUP_APP}"
             cp -R "${STAGED_APP}" "${NEW_APP}"
             if [[ -d "${TARGET_APP}" ]]; then
                 mv "${TARGET_APP}" "${BACKUP_APP}"
             fi
-            mv "${NEW_APP}" "${TARGET_APP}"
-            rm -rf "${BACKUP_APP}" "${STAGING_ROOT}"
+            if mv "${NEW_APP}" "${TARGET_APP}"; then
+                rm -rf "${BACKUP_APP}"
+            else
+                if [[ -d "${BACKUP_APP}" ]]; then
+                    mv "${BACKUP_APP}" "${TARGET_APP}" || true
+                fi
+                exit 1
+            fi
             open -a "${TARGET_APP}"
-        ' _ "${FROM_APP_PID}" "${STAGING_ROOT}" "${STAGED_APP}" "${TARGET_APP}" </dev/null >/tmp/vpnguard-update-relaunch.log 2>&1 &
+        ' _ "${FROM_APP_PID}" "${STAGING_ROOT}" "${STAGED_APP}" "${TARGET_APP}" </dev/null >"${RELAUNCH_LOG_FILE}" 2>&1 &
+        # Hand off STAGING_ROOT cleanup to the detached relaunch script
+        STAGING_ROOT=""
         echo "VPNGUARD_RELAUNCH_SCHEDULED"
     else
         BACKUP_APP="/Applications/.VPNGuard.app.old.$$"
@@ -279,8 +336,15 @@ if [[ "${NEEDS_FRONTEND_UPDATE}" -eq 1 ]]; then
         if [[ -d "${TARGET_APP}" ]]; then
             mv "${TARGET_APP}" "${BACKUP_APP}"
         fi
-        mv "${NEW_APP}" "${TARGET_APP}"
-        rm -rf "${BACKUP_APP}" "${STAGING_ROOT}"
+        if mv "${NEW_APP}" "${TARGET_APP}"; then
+            rm -rf "${BACKUP_APP}"
+        else
+            if [[ -d "${BACKUP_APP}" ]]; then
+                mv "${BACKUP_APP}" "${TARGET_APP}" || true
+            fi
+            rm -rf "${NEW_APP}"
+            exit 1
+        fi
         if [[ "${RELAUNCH}" -eq 1 ]]; then
             killall VPNGuardApp 2>/dev/null || true
             sleep 0.5

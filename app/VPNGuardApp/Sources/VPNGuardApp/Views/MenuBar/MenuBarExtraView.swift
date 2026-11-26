@@ -4,6 +4,7 @@ import AppKit
 public struct MenuBarExtraView: View {
     @ObservedObject var vm: VPNGuardViewModel
     @ObservedObject private var releaseUpdater = GitHubReleaseUpdater.shared
+    @State private var copiedBrewCommand = false
     var onOpenSettings: () -> Void
 
     public init(vm: VPNGuardViewModel, onOpenSettings: @escaping () -> Void) {
@@ -15,6 +16,11 @@ public struct MenuBarExtraView: View {
         VStack(spacing: 12) {
             // MARK: - Compact Status Header
             statusHeader
+
+            // MARK: - Inline Popover Error Banner
+            if let toast = vm.toastMessage, vm.toastIsError {
+                popoverErrorBanner(message: toast)
+            }
 
             // MARK: - Update / Backend Sync Quick Banner
             if releaseUpdater.isUpdateAvailable || releaseUpdater.backendSyncNeeded || vm.updateCheckResult?.updateAvailable == true {
@@ -48,6 +54,36 @@ public struct MenuBarExtraView: View {
         .padding(14)
         .frame(width: 356)
         .background(VGTheme.backgroundContent)
+        .onAppear {
+            vm.refreshBrowserAvailability()
+        }
+    }
+
+    private func popoverErrorBanner(message: String) -> some View {
+        VGCard(padding: 10, accentBorder: VGTheme.statusDanger.opacity(0.45)) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(VGTheme.statusDanger)
+                    .padding(.top, 1)
+
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Spacer(minLength: 4)
+
+                Button {
+                    vm.dismissToast()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 
     // MARK: - Status Header
@@ -295,7 +331,11 @@ public struct MenuBarExtraView: View {
                     .foregroundStyle(.secondary)
 
                 HStack(spacing: 6) {
-                    Text(vm.status.exitIp ?? (vm.isProtectionActive ? "Определяется…" : "—"))
+                    if vm.isResolvingExitIP && vm.status.exitIp == nil {
+                        ProgressView()
+                            .controlSize(.mini)
+                    }
+                    Text(exitIpDisplayText)
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
                         .monospacedDigit()
                         .foregroundStyle(vm.status.exitIp != nil ? .primary : .secondary)
@@ -316,6 +356,24 @@ public struct MenuBarExtraView: View {
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    private var exitIpDisplayText: String {
+        if let ip = vm.status.exitIp, !ip.isEmpty {
+            return ip
+        }
+        switch vm.protectionState {
+        case .on(.loading):
+            return "Определяется…"
+        case .on(.failed):
+            return "Не определён"
+        case .on(.resolved(let ip)):
+            return ip
+        case .on(.idle):
+            return "Определяется…"
+        case .off, .turningOn, .turningOff:
+            return "—"
         }
     }
 
@@ -360,36 +418,64 @@ public struct MenuBarExtraView: View {
 
     // MARK: - Protected Browser
     private var protectedBrowserButton: some View {
-        Button {
-            Task { await vm.launchProtectedBrowser() }
-        } label: {
-            HStack(spacing: 8) {
-                if vm.isLaunchingBrowser {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Image(systemName: "safari")
+        let canLaunch = vm.isProtectionActive && vm.hasSupportedBrowser && !vm.isLaunchingBrowser
+        return VStack(alignment: .leading, spacing: 6) {
+            Button {
+                Task { await vm.launchProtectedBrowser() }
+            } label: {
+                HStack(spacing: 8) {
+                    if vm.isLaunchingBrowser {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: "safari")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(canLaunch ? VGTheme.accentPrimary : .secondary)
+                    }
+                    Text("Открыть защищённый браузер")
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(vm.isProtectionActive ? VGTheme.accentPrimary : .secondary)
+                        .foregroundStyle(canLaunch ? .primary : .secondary)
+                    Spacer()
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
                 }
-                Text("Открыть защищённый браузер")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(vm.isProtectionActive ? .primary : .secondary)
-                Spacer()
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(VGTheme.surfaceLevel1, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
+                        .strokeBorder(VGTheme.borderSubtle, lineWidth: 0.75)
+                )
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(VGTheme.surfaceLevel1, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
-                    .strokeBorder(VGTheme.borderSubtle, lineWidth: 0.75)
+            .buttonStyle(.plain)
+            .disabled(!canLaunch)
+            .help(
+                !vm.hasSupportedBrowser
+                    ? "Установите Chrome, Brave, Edge, Arc, Vivaldi или Chromium (Safari не изолируется)"
+                    : (vm.isProtectionActive ? "Запуск изолированного браузера в песочнице" : "Сначала включите защиту VPNGuard")
             )
+
+            if !vm.hasSupportedBrowser {
+                HStack(spacing: 6) {
+                    Text("Не найден Chrome / Brave / Edge / Arc")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button(copiedBrewCommand ? "Скопировано" : "brew install") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString("brew install --cask brave-browser", forType: .string)
+                        copiedBrewCommand = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            copiedBrewCommand = false
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(VGTheme.accentPrimary)
+                }
+                .padding(.horizontal, 4)
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(!vm.isProtectionActive || vm.isLaunchingBrowser)
-        .help(vm.isProtectionActive ? "Запуск изолированного браузера в песочнице" : "Сначала включите защиту VPNGuard")
     }
 
     // MARK: - Bottom Actions
@@ -401,9 +487,10 @@ public struct MenuBarExtraView: View {
                 Task { await vm.runSecurityAudit() }
             }
 
-            MenuBarActionButton(title: "Контрольный центр", icon: "macwindow") {
+            MenuBarActionButton(title: "Настройки…", icon: "gearshape") {
                 onOpenSettings()
             }
+            .keyboardShortcut(",", modifiers: .command)
 
             Button {
                 NSApp.terminate(nil)

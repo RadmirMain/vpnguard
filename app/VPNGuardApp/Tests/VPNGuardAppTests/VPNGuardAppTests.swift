@@ -208,4 +208,39 @@ final class VPNGuardAppTests: XCTestCase {
         XCTAssertTrue(GitHubReleaseUpdater.verifyEd25519Signature(data: payload, signatureBase64: sig, publicKeyBase64: pubB64))
         XCTAssertFalse(GitHubReleaseUpdater.verifyEd25519Signature(data: Data("tampered".utf8), signatureBase64: sig, publicKeyBase64: pubB64))
     }
+
+    func testProtectionStateInvariantsAndUpdateFetchFailedDecoding() throws {
+        XCTAssertFalse(ProtectionState.off.isProtectionActive)
+        XCTAssertFalse(ProtectionState.off.isTogglingPower)
+
+        XCTAssertFalse(ProtectionState.turningOn.isProtectionActive)
+        XCTAssertTrue(ProtectionState.turningOn.isTogglingPower)
+
+        let loadingState = ProtectionState.on(exitIP: .loading)
+        XCTAssertTrue(loadingState.isProtectionActive)
+        XCTAssertFalse(loadingState.isTogglingPower)
+        XCTAssertTrue(loadingState.isResolvingExitIP)
+
+        let resolvedState = ProtectionState.on(exitIP: .resolved("203.0.113.1"))
+        XCTAssertTrue(resolvedState.isProtectionActive)
+        XCTAssertFalse(resolvedState.isResolvingExitIP)
+
+        let updJson = """
+        {
+          "updateAvailable": false,
+          "backendUpdateNeeded": false,
+          "frontendUpdateNeeded": false,
+          "remoteAheadCount": 0,
+          "localDirty": false,
+          "headCommit": "ba4d92c",
+          "installedBackendHash": "abcdef123456",
+          "currentBackendHash": "abcdef123456",
+          "installedFrontendHash": "123456abcdef",
+          "currentFrontendHash": "123456abcdef",
+          "fetchFailed": true
+        }
+        """
+        let upd = try JSONDecoder().decode(UpdateCheckResult.self, from: Data(updJson.utf8))
+        XCTAssertEqual(upd.fetchFailed, true)
+    }
 }

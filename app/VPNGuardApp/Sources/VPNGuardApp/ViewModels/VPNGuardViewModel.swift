@@ -8,9 +8,12 @@ import Network
 public final class VPNGuardViewModel: ObservableObject {
     // MARK: - Published Properties
     @Published public var status: SystemStatus = .initial
-    @Published public var isProtectionActive: Bool = false
+    @Published public private(set) var protectionState: ProtectionState = .off
     @Published public var statusError: String? = nil
-    @Published public var isTogglingPower: Bool = false
+
+    public var isProtectionActive: Bool { protectionState.isProtectionActive }
+    public var isTogglingPower: Bool { protectionState.isTogglingPower }
+    public var isResolvingExitIP: Bool { protectionState.isResolvingExitIP }
     @Published public var isApplyingRules: Bool = false
     @Published public var isRunningAudit: Bool = false
     @Published public var isUpdatingServer: Bool = false
@@ -41,6 +44,7 @@ public final class VPNGuardViewModel: ObservableObject {
     @Published public var pauseRemainingSeconds: Int = 0
     @Published public var isTogglingPause: Bool = false
     @Published public var isLaunchingBrowser: Bool = false
+    @Published public var hasSupportedBrowser: Bool = true
 
     // Self-Update State (stored in UserDefaults so ad-hoc signature stays intact)
     private static let sourceRepoPathKey = "sourceRepoPath"
@@ -79,6 +83,9 @@ public final class VPNGuardViewModel: ObservableObject {
     private var pathMonitor: NWPathMonitor?
     private var lastPathSignature: String? = nil
     private var networkChangeTask: Task<Void, Never>?
+    private var statusTask: Task<Void, Never>?
+    private var exitIpTask: Task<Void, Never>?
+    private var stateEpoch: UInt64 = 0
     private var isResumingFromPause: Bool = false
     private var isNetworkSatisfied: Bool = true
     private var isCheckingHealth: Bool = false
@@ -102,6 +109,7 @@ public final class VPNGuardViewModel: ObservableObject {
             self.sourceRepoPath = defaultRepo
         }
         self.autoFailoverEnabled = UserDefaults.standard.bool(forKey: Self.autoFailoverKey)
+        self.hasSupportedBrowser = (service.findSupportedChromiumBrowser() != nil)
 
         checkLaunchAtLoginStatus()
 
@@ -131,6 +139,8 @@ public final class VPNGuardViewModel: ObservableObject {
         healthProbeCancellable?.cancel()
         pauseCountdownCancellable?.cancel()
         networkChangeTask?.cancel()
+        statusTask?.cancel()
+        exitIpTask?.cancel()
         pathMonitor?.cancel()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
@@ -150,12 +160,12 @@ public final class VPNGuardViewModel: ObservableObject {
                 guard let self else { return }
                 let utunUp = self.service.isUtunInterfaceUp(name: "utun99")
                 if !utunUp && self.isProtectionActive && !self.isTogglingPower && !self.isTogglingPause {
-                    self.isProtectionActive = false
+                    self.protectionState = .off
                     self.tunnelHealthOk = nil
                     self.tunnelLatencyMs = nil
-                    Task { await self.refreshStatus(fast: true) }
+                    self.scheduleStatusRefresh(fast: true)
                 } else if utunUp && !self.isProtectionActive && !self.isTogglingPower && !self.isTogglingPause {
-                    Task { await self.refreshStatus(fast: true) }
+                    self.scheduleStatusRefresh(fast: true)
                 }
             }
 
@@ -163,9 +173,8 @@ public final class VPNGuardViewModel: ObservableObject {
         periodicSyncCancellable = Timer.publish(every: 45.0, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
-                Task { [weak self] in
-                    await self?.refreshStatus(fast: true)
-                }
+                guard let self, !self.isTogglingPower, !self.isTogglingPause else { return }
+                self.scheduleStatusRefresh(fast: true)
             }
 
         // Real tunnel liveness probe every 25s via 127.0.0.1:18089
@@ -222,9 +231,28 @@ public final class VPNGuardViewModel: ObservableObject {
         monitor.start(queue: DispatchQueue.global(qos: .utility))
     }
 
-    public func refreshStatus(fast: Bool = true) async {
+    private func scheduleStatusRefresh(fast: Bool) {
+        statusTask?.cancel()
+        statusTask = Task { @MainActor [weak self] in
+            await self?.refreshStatus(fast: fast)
+        }
+    }
+
+    private func scheduleBackgroundExitIPResolution() {
+        exitIpTask?.cancel()
+        let epoch = stateEpoch
+        exitIpTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.refreshStatus(fast: false, expectedEpoch: epoch)
+        }
+    }
+
+    public func refreshStatus(fast: Bool = true, expectedEpoch: UInt64? = nil) async {
+        let epoch = expectedEpoch ?? stateEpoch
         do {
             let newStatus = try await service.fetchStatus(fast: fast)
+            guard epoch == stateEpoch, !Task.isCancelled else { return }
+
             // Preserve previously known external IP when doing --fast refresh
             if fast, newStatus.exitIp == nil, self.status.isProtectionOn == newStatus.isProtectionOn,
                newStatus.isProtectionOn, let prevIp = self.status.exitIp {
@@ -248,7 +276,19 @@ public final class VPNGuardViewModel: ObservableObject {
             } else {
                 self.status = newStatus
             }
-            self.isProtectionActive = newStatus.isProtectionOn
+
+            if newStatus.isProtectionOn {
+                if let resolvedIp = self.status.exitIp, !resolvedIp.isEmpty {
+                    self.protectionState = .on(exitIP: .resolved(resolvedIp))
+                } else if fast {
+                    self.protectionState = .on(exitIP: .loading)
+                } else {
+                    self.protectionState = .on(exitIP: .failed)
+                }
+            } else {
+                self.protectionState = .off
+            }
+
             self.statusError = nil
             if newStatus.isProtectionOn {
                 setPauseEndDate(nil)
@@ -261,34 +301,55 @@ public final class VPNGuardViewModel: ObservableObject {
             }
             TrafficMonitorService.shared.configure(url: newStatus.clashApiUrl, secret: newStatus.clashApiSecret)
         } catch {
+            guard epoch == stateEpoch, !Task.isCancelled else { return }
             self.statusError = error.localizedDescription
-            self.isProtectionActive = false
+            if !self.isTogglingPower {
+                self.protectionState = .off
+            }
         }
     }
 
-    // MARK: - Power Toggle
+    // MARK: - Power Toggle (Two-Phase Activation + stateEpoch)
     public func toggleProtection() async {
         guard !isTogglingPower else { return }
-        isTogglingPower = true
         let targetState = !isProtectionActive
+        stateEpoch &+= 1
+        let opEpoch = stateEpoch
+        statusTask?.cancel()
+        exitIpTask?.cancel()
+        protectionState = targetState ? .turningOn : .turningOff
 
         do {
             if targetState {
                 showToast("Включение защиты VPNGuard...", isError: false)
                 try await service.turnOn()
+                guard opEpoch == stateEpoch else { return }
                 setPauseEndDate(nil)
+                // Phase 1: fast local check (PIDs, PF, utun99) -> immediately mark active
+                await refreshStatus(fast: true, expectedEpoch: opEpoch)
+                if !isProtectionActive {
+                    protectionState = .on(exitIP: .loading)
+                }
+                showToast("Защита VPNGuard активирована", isError: false)
+                // Phase 2: resolve external exit IP asynchronously without blocking UI
+                scheduleBackgroundExitIPResolution()
             } else {
                 showToast("Отключение защиты...", isError: false)
                 try await service.turnOff()
+                guard opEpoch == stateEpoch else { return }
                 setPauseEndDate(nil)
+                await refreshStatus(fast: true, expectedEpoch: opEpoch)
+                if isTogglingPower {
+                    protectionState = .off
+                }
+                showToast("Защита отключена", isError: false)
             }
-            await refreshStatus(fast: !targetState)
-            showToast(targetState ? "Защита VPNGuard активирована" : "Защита отключена", isError: false)
         } catch {
+            guard opEpoch == stateEpoch else { return }
             showToast(error.localizedDescription, isError: true)
-            await refreshStatus(fast: true)
+            protectionState = .off
+            await refreshStatus(fast: true, expectedEpoch: opEpoch)
         }
-        isTogglingPower = false
     }
 
     // MARK: - Wi-Fi Captive Portal Pause
@@ -407,8 +468,17 @@ public final class VPNGuardViewModel: ObservableObject {
     }
 
     // MARK: - Sandbox Browser Launcher (Non-root GID 888)
+    public func refreshBrowserAvailability() {
+        hasSupportedBrowser = (service.findSupportedChromiumBrowser() != nil)
+    }
+
     public func launchProtectedBrowser() async {
         guard !isLaunchingBrowser else { return }
+        refreshBrowserAvailability()
+        guard hasSupportedBrowser else {
+            showToast("Не найден Chromium-браузер (Chrome, Brave, Edge, Arc, Vivaldi или Chromium)", isError: true)
+            return
+        }
         isLaunchingBrowser = true
         defer { isLaunchingBrowser = false }
 
@@ -1023,6 +1093,11 @@ public final class VPNGuardViewModel: ObservableObject {
     }
 
     // MARK: - Toast Helpers
+    public func dismissToast() {
+        self.toastMessage = nil
+        self.toastIsError = false
+    }
+
     public func showToast(_ message: String, isError: Bool = false) {
         self.toastMessage = message
         self.toastIsError = isError

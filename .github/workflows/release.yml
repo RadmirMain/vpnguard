@@ -61,15 +61,19 @@ jobs:
           find Package.swift build_app.sh Resources Sources -type f ! -name '.DS_Store' \
             -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}' > dist/VPNGuard.app/Contents/Resources/frontend.sha256
 
-          # Bundle backend payload + backend.sha256 inside Resources/backend
+          # Bundle backend payload + prebuilt vpnguard-exec + canonical backend.sha256 inside Resources/backend
+          mkdir -p dist/VPNGuard.app/Contents/Resources/backend/libexec
           cp "${REPO_ROOT}/install.sh" dist/VPNGuard.app/Contents/Resources/backend/install.sh
           chmod +x dist/VPNGuard.app/Contents/Resources/backend/install.sh
           rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='xray/xray.json' --exclude='servers.json' --exclude='.DS_Store' "${REPO_ROOT}/src" dist/VPNGuard.app/Contents/Resources/backend/
           rsync -a --exclude='.DS_Store' "${REPO_ROOT}/bin" dist/VPNGuard.app/Contents/Resources/backend/
+          clang -Wall -Wextra -Werror -O2 -arch arm64 -o dist/VPNGuard.app/Contents/Resources/backend/libexec/vpnguard-exec "${REPO_ROOT}/src/vpnguard_exec.c"
           (
             cd "${REPO_ROOT}"
-            find install.sh src/vpnguard.py src/vpnguard_exec.c src/pf src/xray src/singbox src/browser bin/vpnguard \
-              -type f ! -name 'xray.json' ! -name '.DS_Store' \
+            find src bin install.sh -type f \
+              ! -name 'vpnguard-xray' ! -name 'vpnguard-exec' \
+              ! -name 'xray.json' ! -name 'servers.json' \
+              ! -path '*/__pycache__/*' ! -name '*.pyc' ! -name '.DS_Store' \
               -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}'
           ) > dist/VPNGuard.app/Contents/Resources/backend/backend.sha256
 

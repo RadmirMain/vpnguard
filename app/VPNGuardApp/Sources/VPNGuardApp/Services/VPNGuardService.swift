@@ -138,10 +138,37 @@ public final class VPNGuardService {
     }
 
     // MARK: - Sandbox Launchers (Direct user execution, NEVER sudo)
+    public func findSupportedChromiumBrowser() -> String? {
+        let homeApps = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications").path
+        let appDirs = ["/Applications", homeApps]
+        let relCandidates = [
+            "Google Chrome.app/Contents/MacOS/Google Chrome",
+            "Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+            "Brave Browser.app/Contents/MacOS/Brave Browser",
+            "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "Chromium.app/Contents/MacOS/Chromium",
+            "Ungoogled Chromium.app/Contents/MacOS/Chromium",
+            "Vivaldi.app/Contents/MacOS/Vivaldi",
+            "Arc.app/Contents/MacOS/Arc"
+        ]
+        for dir in appDirs {
+            for rel in relCandidates {
+                let path = (dir as NSString).appendingPathComponent(rel)
+                if FileManager.default.isExecutableFile(atPath: path) {
+                    return path
+                }
+            }
+        }
+        return nil
+    }
+
     public func launchProtectedBrowser() async throws {
         let browserPath = "/usr/local/bin/vpnguard-browser"
         guard FileManager.default.isExecutableFile(atPath: browserPath) else {
             throw VPNGuardError.commandFailed("Не найден \(browserPath). Выполните установку/обновление бэкенда.")
+        }
+        guard findSupportedChromiumBrowser() != nil else {
+            throw VPNGuardError.commandFailed("Не найден Chromium-браузер (Chrome, Brave, Edge, Arc, Vivaldi или Chromium). Fallback на Safari запрещён для защиты от утечек.")
         }
         try await launchDetachedProcess(executablePath: browserPath, arguments: [], logPath: "/tmp/vpnguard-browser-launch.log")
     }
@@ -159,22 +186,50 @@ public final class VPNGuardService {
         process.standardOutput = logHandle
         process.standardError = logHandle
 
-        do {
-            try process.run()
-        } catch {
-            try? logHandle.close()
-            throw VPNGuardError.commandFailed("Ошибка запуска: \(error.localizedDescription)")
+        final class OnceFlag: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            func tryAcquire() -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                if done { return false }
+                done = true
+                return true
+            }
         }
 
-        // Close parent descriptor immediately so child never blocks on pipe buffers
-        try? logHandle.close()
+        let earlyExitStatus: Int32? = try await withCheckedThrowingContinuation { continuation in
+            let once = OnceFlag()
 
-        // Check briefly if fail-closed pre-flight rejected launch (e.g. PF off or no Chrome)
-        try? await Task.sleep(nanoseconds: 1_200_000_000)
-        if !process.isRunning && process.terminationStatus != 0 {
+            process.terminationHandler = { proc in
+                guard once.tryAcquire() else { return }
+                continuation.resume(returning: proc.terminationStatus)
+            }
+
+            do {
+                try process.run()
+            } catch {
+                try? logHandle.close()
+                if once.tryAcquire() {
+                    continuation.resume(throwing: VPNGuardError.commandFailed("Ошибка запуска: \(error.localizedDescription)"))
+                }
+                return
+            }
+
+            // Close parent descriptor immediately so child never blocks on pipe buffers
+            try? logHandle.close()
+
+            // If child is still alive after 1.2s, consider launch healthy and detach
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1.2) {
+                guard once.tryAcquire() else { return }
+                continuation.resume(returning: nil)
+            }
+        }
+
+        if let exitCode = earlyExitStatus, exitCode != 0 {
             let rawLog = (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? ""
             let snippet = String(rawLog.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))
-            throw VPNGuardError.commandFailed(snippet.isEmpty ? "Процесс завершился с кодом \(process.terminationStatus)" : snippet)
+            throw VPNGuardError.commandFailed(snippet.isEmpty ? "Процесс завершился с кодом \(exitCode)" : snippet)
         }
     }
 

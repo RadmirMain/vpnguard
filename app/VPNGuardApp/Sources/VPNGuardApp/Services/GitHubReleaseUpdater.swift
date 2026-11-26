@@ -147,7 +147,7 @@ public final class GitHubReleaseUpdater: ObservableObject {
         defer { isSyncingBackend = false }
 
         let escaped = installScriptUrl.path.replacingOccurrences(of: "\"", with: "\\\"")
-        let appleScript = "do shell script \"\\\"\(escaped)\\\" --backend-only\" with administrator privileges"
+        let appleScript = "do shell script \"cd / && \\\"\(escaped)\\\" --backend-only\" with administrator privileges"
 
         let exitCode = await Task.detached(priority: .userInitiated) {
             Self.runProcess("/usr/bin/osascript", args: ["-e", appleScript])
@@ -205,13 +205,13 @@ public final class GitHubReleaseUpdater: ObservableObject {
                 return
             }
 
-            if http.statusCode == 403 {
+            if http.statusCode == 403 || http.statusCode == 429 {
                 // Rate limit fallback via HEAD redirect (zero API quota)
                 if let fallbackRelease = await checkLatestViaRedirect() {
                     applyReleaseInfo(fallbackRelease)
                     return
                 }
-                if !silent { status = .error("Превышен лимит GitHub API (403)") }
+                if !silent { status = .error("Превышен лимит GitHub API (\(http.statusCode))") }
                 return
             }
 
@@ -361,6 +361,11 @@ public final class GitHubReleaseUpdater: ObservableObject {
                 return
             }
 
+            // Strip quarantine attribute before signature verification and launch
+            _ = await Task.detached(priority: .userInitiated) {
+                Self.runProcess("/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", newAppUrl.path])
+            }.value
+
             let signOk = await Task.detached(priority: .userInitiated) {
                 Self.runProcess("/usr/bin/codesign", args: ["--verify", "--deep", newAppUrl.path]) == 0
             }.value
@@ -374,7 +379,11 @@ public final class GitHubReleaseUpdater: ObservableObject {
             // Stage directly on /Applications volume so final rename is atomic
             try? FileManager.default.removeItem(atPath: applicationsStaging)
             let copyOk = await Task.detached(priority: .userInitiated) {
-                Self.runProcess("/usr/bin/ditto", args: [newAppUrl.path, applicationsStaging]) == 0
+                let ok = Self.runProcess("/usr/bin/ditto", args: [newAppUrl.path, applicationsStaging]) == 0
+                if ok {
+                    _ = Self.runProcess("/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", applicationsStaging])
+                }
+                return ok
             }.value
             try? FileManager.default.removeItem(at: tempRoot)
 
