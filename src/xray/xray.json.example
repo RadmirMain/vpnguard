@@ -1,7 +1,6 @@
 {
   "log": {
     "access": "none",
-    "error": "/var/log/vpnguard-xray.log",
     "loglevel": "warning"
   },
   "inbounds": [

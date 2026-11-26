@@ -172,27 +172,10 @@ public struct ClashConnection: Codable, Identifiable, Equatable {
 
 public enum ByteFormatter {
     public static func format(_ bytes: Int64) -> String {
-        let b = max(0, bytes)
-        if b < 1024 {
-            return "\(b) Б"
-        }
-        let kb = Double(b) / 1024.0
-        if kb < 1024.0 {
-            return String(format: "%.1f КБ", kb)
-        }
-        let mb = kb / 1024.0
-        if mb < 1024.0 {
-            return String(format: "%.1f МБ", mb)
-        }
-        let gb = mb / 1024.0
-        return String(format: "%.2f ГБ", gb)
+        VGFormatters.formatBytes(bytes)
     }
 
     public static func formatSpeed(_ bytesPerSec: Int64) -> String {
-        let b = max(0, bytesPerSec)
-        if b == 0 {
-            return "0 Б/с"
-        }
-        return "\(format(b))/с"
+        VGFormatters.formatSpeed(bytesPerSec)
     }
 }

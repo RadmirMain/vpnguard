@@ -73,14 +73,17 @@ public struct MainContainerView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 7) {
                         Circle()
-                            .fill(vm.isProtectionActive ? VGTheme.statusProtected : ((vm.pauseRemainingSeconds > 0 || vm.isTunnelRecovering) ? VGTheme.statusWarning : VGTheme.statusDanger))
+                            .fill(vm.isProtectionActive ? VGTheme.statusProtected : ((vm.isPauseActive || vm.isTunnelRecovering) ? VGTheme.statusWarning : VGTheme.statusDanger))
                             .frame(width: 7, height: 7)
 
-                        if let countdown = vm.menuBarPauseText {
-                            Text("Пауза Wi-Fi (\(countdown))")
-                                .font(.system(size: 11, weight: .medium))
-                                .monospacedDigit()
-                                .foregroundStyle(VGTheme.statusWarning)
+                        if let pauseEnd = vm.pauseEndDate, vm.isPauseActive {
+                            TimelineView(.periodic(from: .now, by: 1.0)) { context in
+                                let countdown = VGFormatters.formatCountdown(until: pauseEnd, now: context.date) ?? "00:00"
+                                Text("Пауза Wi-Fi (\(countdown))")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .monospacedDigit()
+                                    .foregroundStyle(VGTheme.statusWarning)
+                            }
                         } else if vm.isTunnelRecovering {
                             Text("Kill-Switch активен")
                                 .font(.system(size: 11, weight: .medium))

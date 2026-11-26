@@ -58,7 +58,7 @@ if [[ -d "${REPO_ROOT}/src" ]]; then
     rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='xray/xray.json' --exclude='servers.json' --exclude='.DS_Store' "${REPO_ROOT}/src" "${BACKEND_DEST}/"
 fi
 if [[ -d "${REPO_ROOT}/bin" ]]; then
-    rsync -a --exclude='.DS_Store' "${REPO_ROOT}/bin" "${BACKEND_DEST}/"
+    rsync -a --exclude='.DS_Store' --exclude='vpnguard-xray' --exclude='vpnguard-exec' "${REPO_ROOT}/bin" "${BACKEND_DEST}/"
 fi
 if [[ -f "${REPO_ROOT}/src/vpnguard_exec.c" ]]; then
     clang -Wall -Wextra -Werror -O2 -arch arm64 -o "${BACKEND_DEST}/libexec/vpnguard-exec" "${REPO_ROOT}/src/vpnguard_exec.c"

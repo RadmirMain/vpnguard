@@ -74,7 +74,7 @@ public struct AppPickerSheet: View {
                             let isAlreadyAdded = vm.rules.apps.contains(where: { $0.bundlePath == app.path })
 
                             HStack(spacing: 12) {
-                                Image(nsImage: NSWorkspace.shared.icon(forFile: app.path))
+                                Image(nsImage: AppIconCache.shared.iconOrDefault(forAppPath: app.path))
                                     .resizable()
                                     .frame(width: 28, height: 28)
 

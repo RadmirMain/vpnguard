@@ -220,7 +220,7 @@ if [[ "${NEEDS_FRONTEND_UPDATE}" -eq 1 ]]; then
     cp "${SCRIPT_DIR}/install.sh" "${STAGED_APP}/Contents/Resources/backend/install.sh"
     chmod +x "${STAGED_APP}/Contents/Resources/backend/install.sh"
     rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='xray/xray.json' --exclude='servers.json' --exclude='.DS_Store' "${SCRIPT_DIR}/src" "${STAGED_APP}/Contents/Resources/backend/"
-    rsync -a --exclude='.DS_Store' "${SCRIPT_DIR}/bin" "${STAGED_APP}/Contents/Resources/backend/"
+    rsync -a --exclude='.DS_Store' --exclude='vpnguard-xray' --exclude='vpnguard-exec' "${SCRIPT_DIR}/bin" "${STAGED_APP}/Contents/Resources/backend/"
     clang -Wall -Wextra -Werror -O2 -arch arm64 -o "${STAGED_APP}/Contents/Resources/backend/libexec/vpnguard-exec" "${SCRIPT_DIR}/src/vpnguard_exec.c"
     printf '%s\n' "${CURRENT_BACKEND_HASH}" > "${STAGED_APP}/Contents/Resources/backend/backend.sha256"
 
@@ -241,7 +241,7 @@ if [[ "${NEEDS_BACKEND_UPDATE}" -eq 1 ]]; then
         cp "${SCRIPT_DIR}/install.sh" "${BACKEND_STAGE_ROOT}/install.sh"
         chmod +x "${BACKEND_STAGE_ROOT}/install.sh"
         rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='xray/xray.json' --exclude='servers.json' --exclude='.DS_Store' "${SCRIPT_DIR}/src" "${BACKEND_STAGE_ROOT}/"
-        rsync -a --exclude='.DS_Store' "${SCRIPT_DIR}/bin" "${BACKEND_STAGE_ROOT}/"
+        rsync -a --exclude='.DS_Store' --exclude='vpnguard-xray' --exclude='vpnguard-exec' "${SCRIPT_DIR}/bin" "${BACKEND_STAGE_ROOT}/"
         printf '%s\n' "${CURRENT_BACKEND_HASH}" > "${BACKEND_STAGE_ROOT}/backend.sha256"
         BACKEND_INSTALLER="${BACKEND_STAGE_ROOT}/install.sh"
     fi

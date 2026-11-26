@@ -117,7 +117,7 @@ private struct AppRuleRow: View {
     var body: some View {
         HStack(spacing: 14) {
             HStack(spacing: 12) {
-                Image(nsImage: NSWorkspace.shared.icon(forFile: app.bundlePath))
+                Image(nsImage: AppIconCache.shared.iconOrDefault(forAppPath: app.bundlePath))
                     .resizable()
                     .frame(width: 30, height: 30)
 
@@ -128,7 +128,7 @@ private struct AppRuleRow: View {
                             .foregroundStyle(.primary)
                             .lineLimit(1)
 
-                        if !FileManager.default.fileExists(atPath: app.bundlePath) {
+                        if !AppIconCache.shared.exists(app.bundlePath) {
                             VGStatusBadge("Не найдено", tone: .danger)
                         }
                     }

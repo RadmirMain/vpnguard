@@ -43,11 +43,15 @@ public final class VPNGuardViewModel: ObservableObject {
     @Published public var launchAtLogin: Bool = false
 
     // Wi-Fi Captive Portal Pause State
-    @Published public var pauseEndDate: Date? = nil
-    @Published public var pauseRemainingSeconds: Int = 0
+    @Published public private(set) var pauseEndDate: Date? = nil
     @Published public var isTogglingPause: Bool = false
     @Published public var isLaunchingBrowser: Bool = false
     @Published public var hasSupportedBrowser: Bool = true
+
+    public var isPauseActive: Bool {
+        guard let end = pauseEndDate else { return false }
+        return end.timeIntervalSinceNow > 0
+    }
 
     // Self-Update State (stored in UserDefaults so ad-hoc signature stays intact)
     private static let sourceRepoPathKey = "sourceRepoPath"
@@ -81,7 +85,7 @@ public final class VPNGuardViewModel: ObservableObject {
     private var nativeProbeCancellable: AnyCancellable?
     private var periodicSyncCancellable: AnyCancellable?
     private var healthProbeCancellable: AnyCancellable?
-    private var pauseCountdownCancellable: AnyCancellable?
+    private var pauseExpirationTask: Task<Void, Never>?
     private var wakeObserver: NSObjectProtocol?
     private var pathMonitor: NWPathMonitor?
     private var lastPathSignature: String? = nil
@@ -124,12 +128,18 @@ public final class VPNGuardViewModel: ObservableObject {
             TrafficMonitorService.shared.configure(url: "127.0.0.1:9090", secret: localSecret)
         }
 
-        Task {
-            await refreshStatus(fast: false)
-            await loadRules()
-            await loadServers()
-            await runTunnelHealthCheck(allowFailover: false)
-            await GitHubReleaseUpdater.shared.checkIfDailyDue()
+        Task { [weak self] in
+            guard let self else { return }
+            // Fast local posture first for instant UI readiness, then fan out secondary fetches concurrently
+            await self.refreshStatus(fast: true)
+            async let rulesTask: () = self.loadRules()
+            async let serversTask: () = self.loadServers()
+            async let healthTask: () = self.runTunnelHealthCheck(allowFailover: false)
+            async let updateTask: () = GitHubReleaseUpdater.shared.checkIfDailyDue()
+            _ = await (rulesTask, serversTask, healthTask, updateTask)
+            if self.isProtectionActive {
+                self.scheduleBackgroundExitIPResolution()
+            }
         }
         startTimers()
         startNetworkMonitor()
@@ -140,7 +150,7 @@ public final class VPNGuardViewModel: ObservableObject {
         nativeProbeCancellable?.cancel()
         periodicSyncCancellable?.cancel()
         healthProbeCancellable?.cancel()
-        pauseCountdownCancellable?.cancel()
+        pauseExpirationTask?.cancel()
         networkChangeTask?.cancel()
         statusTask?.cancel()
         exitIpTask?.cancel()
@@ -361,10 +371,8 @@ public final class VPNGuardViewModel: ObservableObject {
 
     // MARK: - Wi-Fi Captive Portal Pause
     public var menuBarPauseText: String? {
-        guard pauseRemainingSeconds > 0 else { return nil }
-        let mins = pauseRemainingSeconds / 60
-        let secs = pauseRemainingSeconds % 60
-        return String(format: "%02d:%02d", mins, secs)
+        guard let endDate = pauseEndDate else { return nil }
+        return VGFormatters.formatCountdown(until: endDate)
     }
 
     public func pauseForWifi(seconds: Int = 300) async {
@@ -418,33 +426,24 @@ public final class VPNGuardViewModel: ObservableObject {
 
     private func setPauseEndDate(_ date: Date?) {
         pauseEndDate = date
-        pauseCountdownCancellable?.cancel()
-        pauseCountdownCancellable = nil
+        pauseExpirationTask?.cancel()
+        pauseExpirationTask = nil
 
-        guard let target = date else {
-            pauseRemainingSeconds = 0
-            return
-        }
+        guard let target = date else { return }
 
-        let rem = max(0, Int(ceil(target.timeIntervalSinceNow)))
-        pauseRemainingSeconds = rem
-        if rem == 0 {
+        let delay = target.timeIntervalSinceNow
+        if delay <= 0 {
             Task { await handlePauseExpiration() }
             return
         }
 
-        pauseCountdownCancellable = Timer.publish(every: 1.0, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in
-                guard let self, let end = self.pauseEndDate else { return }
-                let left = max(0, Int(ceil(end.timeIntervalSinceNow)))
-                self.pauseRemainingSeconds = left
-                if left <= 0 {
-                    self.pauseCountdownCancellable?.cancel()
-                    self.pauseCountdownCancellable = nil
-                    Task { await self.handlePauseExpiration() }
-                }
-            }
+        pauseExpirationTask = Task { @MainActor [weak self] in
+            let nanos = UInt64(max(0.05, delay) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanos)
+            guard let self, !Task.isCancelled else { return }
+            self.pauseExpirationTask = nil
+            await self.handlePauseExpiration()
+        }
     }
 
     private func startWakeObserver() {

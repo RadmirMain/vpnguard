@@ -17,7 +17,7 @@ private struct GroupedTrafficEntry: Identifiable {
 
 public struct TrafficMonitorView: View {
     @ObservedObject var vm: VPNGuardViewModel
-    @StateObject private var monitor = TrafficMonitorService.shared
+    @ObservedObject private var monitor = TrafficMonitorService.shared
 
     @State private var searchText: String = ""
     @State private var selectedFilter: FilterRoute = .all
@@ -26,6 +26,8 @@ public struct TrafficMonitorView: View {
     @State private var showCloseAllAlert: Bool = false
     @State private var isHoveringList: Bool = false
     @State private var frozenConnections: [ClashConnection] = []
+    @State private var cachedFilteredConnections: [ClashConnection] = []
+    @State private var cachedGroupedEntries: [GroupedTrafficEntry] = []
 
     enum FilterRoute: String, CaseIterable, Identifiable {
         case all = "Все"
@@ -39,12 +41,10 @@ public struct TrafficMonitorView: View {
         self.vm = vm
     }
 
-    private var sourceConnections: [ClashConnection] {
-        isHoveringList ? frozenConnections : monitor.connections
-    }
-
-    private var filteredConnections: [ClashConnection] {
-        sourceConnections.filter { conn in
+    private func recomputeConnectionLists() {
+        let source = isHoveringList ? frozenConnections : monitor.connections
+        let query = searchText.lowercased()
+        let filtered = source.filter { conn in
             switch selectedFilter {
             case .all:
                 break
@@ -54,8 +54,7 @@ public struct TrafficMonitorView: View {
                 if conn.isProxy { return false }
             }
 
-            if !searchText.isEmpty {
-                let query = searchText.lowercased()
+            if !query.isEmpty {
                 let matchesProcess = conn.processName.lowercased().contains(query)
                 let matchesPath = conn.metadata.processPath?.lowercased().contains(query) ?? false
                 let matchesHost = conn.destinationHost.lowercased().contains(query)
@@ -66,16 +65,16 @@ public struct TrafficMonitorView: View {
 
             return true
         }
-    }
 
-    private var groupedEntries: [GroupedTrafficEntry] {
+        cachedFilteredConnections = filtered
+
         var buckets: [String: [ClashConnection]] = [:]
-        for conn in filteredConnections {
+        for conn in filtered {
             let canonical = conn.metadata.processPath.map { VPNGuardViewModel.canonicalProcessTarget(from: $0).path } ?? conn.processName
             let key = "\(canonical)|\(conn.destinationHost)|\(conn.isProxy ? "1" : "0")"
             buckets[key, default: []].append(conn)
         }
-        return buckets.map { key, items in
+        cachedGroupedEntries = buckets.map { key, items in
             let first = items[0]
             let canonicalName = first.metadata.processPath.map { VPNGuardViewModel.canonicalProcessTarget(from: $0).name } ?? first.processName
             let totalDown = items.reduce(Int64(0)) { $0 + $1.download }
@@ -200,9 +199,24 @@ public struct TrafficMonitorView: View {
                 monitor.configure(url: url, secret: secret)
             }
             monitor.startMonitoring()
+            recomputeConnectionLists()
         }
         .onDisappear {
             monitor.stopMonitoring()
+        }
+        .onChange(of: monitor.connectionsVersion) { _, _ in
+            if !isHoveringList {
+                recomputeConnectionLists()
+            }
+        }
+        .onChange(of: searchText) { _, _ in
+            recomputeConnectionLists()
+        }
+        .onChange(of: selectedFilter) { _, _ in
+            recomputeConnectionLists()
+        }
+        .onChange(of: isHoveringList) { _, _ in
+            recomputeConnectionLists()
         }
         .alert("Закрыть соединение?", isPresented: Binding(
             get: { connectionToClose != nil },
@@ -217,6 +231,7 @@ public struct TrafficMonitorView: View {
                     Task {
                         if await monitor.closeConnection(id: targetId) {
                             frozenConnections.removeAll { $0.id == targetId }
+                            recomputeConnectionLists()
                         }
                     }
                 }
@@ -233,6 +248,7 @@ public struct TrafficMonitorView: View {
                 Task {
                     if await monitor.closeAllConnections() {
                         frozenConnections.removeAll()
+                        recomputeConnectionLists()
                     }
                 }
             }
@@ -249,16 +265,16 @@ public struct TrafficMonitorView: View {
                     title: "Загрузка",
                     icon: "arrow.down.circle.fill",
                     tint: VGTheme.accentPrimary,
-                    value: ByteFormatter.formatSpeed(monitor.downloadSpeed),
-                    subtitle: "Всего: \(ByteFormatter.format(monitor.downloadTotal))"
+                    value: VGFormatters.formatSpeed(monitor.downloadSpeed),
+                    subtitle: "Всего: \(VGFormatters.formatBytes(monitor.downloadTotal))"
                 )
 
                 metricCard(
                     title: "Отдача",
                     icon: "arrow.up.circle.fill",
                     tint: Color.indigo,
-                    value: ByteFormatter.formatSpeed(monitor.uploadSpeed),
-                    subtitle: "Всего: \(ByteFormatter.format(monitor.uploadTotal))"
+                    value: VGFormatters.formatSpeed(monitor.uploadSpeed),
+                    subtitle: "Всего: \(VGFormatters.formatBytes(monitor.uploadTotal))"
                 )
 
                 metricCard(
@@ -266,7 +282,7 @@ public struct TrafficMonitorView: View {
                     icon: "network",
                     tint: VGTheme.statusProtected,
                     value: "\(monitor.connections.count)",
-                    subtitle: "Отфильтровано: \(filteredConnections.count)"
+                    subtitle: "Отфильтровано: \(cachedFilteredConnections.count)"
                 )
             }
         }
@@ -306,8 +322,8 @@ public struct TrafficMonitorView: View {
         VStack(alignment: .leading, spacing: 10) {
             VGSectionHeader(
                 groupByProcessAndHost
-                    ? "Группы соединений (\(groupedEntries.count) из \(filteredConnections.count))"
-                    : "Активные сессии (\(filteredConnections.count))"
+                    ? "Группы соединений (\(cachedGroupedEntries.count) из \(cachedFilteredConnections.count))"
+                    : "Активные сессии (\(cachedFilteredConnections.count))"
             ) {
                 if isHoveringList {
                     VGStatusBadge("Пауза при наведении", tone: .warning, showDot: true)
@@ -318,7 +334,7 @@ public struct TrafficMonitorView: View {
                 }
             }
 
-            if filteredConnections.isEmpty {
+            if cachedFilteredConnections.isEmpty {
                 VGCard(padding: 20) {
                     VGEmptyStateView(
                         icon: "network.slash",
@@ -331,11 +347,11 @@ public struct TrafficMonitorView: View {
             } else {
                 LazyVStack(spacing: 6) {
                     if groupByProcessAndHost {
-                        ForEach(groupedEntries) { entry in
+                        ForEach(cachedGroupedEntries) { entry in
                             groupedConnectionRow(entry)
                         }
                     } else {
-                        ForEach(filteredConnections) { conn in
+                        ForEach(cachedFilteredConnections) { conn in
                             connectionRow(conn)
                         }
                     }
@@ -416,7 +432,7 @@ public struct TrafficMonitorView: View {
                     Image(systemName: "arrow.down")
                         .font(.system(size: 9))
                         .foregroundStyle(VGTheme.accentPrimary)
-                    Text(ByteFormatter.format(entry.totalDownload))
+                    Text(VGFormatters.formatBytes(entry.totalDownload))
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .monospacedDigit()
                 }
@@ -424,7 +440,7 @@ public struct TrafficMonitorView: View {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
-                    Text(ByteFormatter.format(entry.totalUpload))
+                    Text(VGFormatters.formatBytes(entry.totalUpload))
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .monospacedDigit()
                 }
@@ -440,18 +456,29 @@ public struct TrafficMonitorView: View {
                 hasPath: hasPath
             )
 
-            // Close group connections
+            // Close group connections in parallel
             Button {
                 let ids = entry.connectionIds
+                let service = monitor
                 Task {
-                    var closedIds: Set<String> = []
-                    for id in ids {
-                        if await monitor.closeConnection(id: id) {
-                            closedIds.insert(id)
+                    let closedIds = await withTaskGroup(of: String?.self, returning: Set<String>.self) { group in
+                        for id in ids {
+                            group.addTask {
+                                let ok = await service.closeConnection(id: id)
+                                return ok ? id : nil
+                            }
                         }
+                        var result: Set<String> = []
+                        for await closedId in group {
+                            if let closedId {
+                                result.insert(closedId)
+                            }
+                        }
+                        return result
                     }
                     if !closedIds.isEmpty {
                         frozenConnections.removeAll { closedIds.contains($0.id) }
+                        recomputeConnectionLists()
                     }
                 }
             } label: {
@@ -712,8 +739,8 @@ public struct TrafficMonitorView: View {
     private func processIconView(path: String?, isProxy: Bool) -> some View {
         if let path, let appRange = path.range(of: ".app") {
             let appBundlePath = String(path[..<appRange.upperBound])
-            if FileManager.default.fileExists(atPath: appBundlePath) {
-                Image(nsImage: NSWorkspace.shared.icon(forFile: appBundlePath))
+            if let cachedIcon = AppIconCache.shared.icon(forAppPath: appBundlePath) {
+                Image(nsImage: cachedIcon)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
             } else {

@@ -66,7 +66,7 @@ jobs:
           cp "${REPO_ROOT}/install.sh" dist/VPNGuard.app/Contents/Resources/backend/install.sh
           chmod +x dist/VPNGuard.app/Contents/Resources/backend/install.sh
           rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='xray/xray.json' --exclude='servers.json' --exclude='.DS_Store' "${REPO_ROOT}/src" dist/VPNGuard.app/Contents/Resources/backend/
-          rsync -a --exclude='.DS_Store' "${REPO_ROOT}/bin" dist/VPNGuard.app/Contents/Resources/backend/
+          rsync -a --exclude='.DS_Store' --exclude='vpnguard-xray' --exclude='vpnguard-exec' "${REPO_ROOT}/bin" dist/VPNGuard.app/Contents/Resources/backend/
           clang -Wall -Wextra -Werror -O2 -arch arm64 -o dist/VPNGuard.app/Contents/Resources/backend/libexec/vpnguard-exec "${REPO_ROOT}/src/vpnguard_exec.c"
           (
             cd "${REPO_ROOT}"

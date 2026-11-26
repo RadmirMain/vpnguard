@@ -14,6 +14,7 @@ public final class TrafficMonitorService: ObservableObject {
     @Published public var isMonitoring: Bool = false
     @Published public var isConnected: Bool = false
     @Published public var connections: [ClashConnection] = []
+    @Published public private(set) var connectionsVersion: UInt64 = 0
     @Published public var downloadTotal: Int64 = 0
     @Published public var uploadTotal: Int64 = 0
     @Published public var uploadSpeed: Int64 = 0
@@ -145,6 +146,7 @@ public final class TrafficMonitorService: ObservableObject {
                         self.uploadTotal = snapshot.uploadTotal
                         self.downloadTotal = snapshot.downloadTotal
                         self.connections = snapshot.connections
+                        self.connectionsVersion &+= 1
                     }
                 }
             } catch {
@@ -233,6 +235,7 @@ public final class TrafficMonitorService: ObservableObject {
                 self.uploadTotal = snapshot.uploadTotal
                 self.downloadTotal = snapshot.downloadTotal
                 self.connections = snapshot.connections
+                self.connectionsVersion &+= 1
             } else if httpResp.statusCode == 401 {
                 self.isConnected = false
                 self.lastError = "401 Unauthorized: неверный секрет токена Clash API"

@@ -105,12 +105,27 @@ if [[ -f "/usr/local/libexec/vpnguard-xray" ]] && file -b "/usr/local/libexec/vp
     echo -e "    ${C_GREEN}✓ Preserved existing Mach-O binary at /usr/local/libexec/vpnguard-xray${C_RESET}"
 else
     XRAY_BIN=""
-    if [[ -f "${SCRIPT_DIR}/bin/vpnguard-xray" ]] && file -b "${SCRIPT_DIR}/bin/vpnguard-xray" | grep -q "Mach-O"; then
-        XRAY_BIN="${SCRIPT_DIR}/bin/vpnguard-xray"
-    elif command -v xray &>/dev/null; then
+    for cand in "${SCRIPT_DIR}/bin/vpnguard-xray" /opt/homebrew/bin/xray /usr/local/bin/xray /opt/homebrew/opt/xray/bin/xray /usr/local/opt/xray/bin/xray; do
+        if [[ -f "${cand}" ]] && file -b "${cand}" | grep -q "Mach-O"; then
+            XRAY_BIN="${cand}"
+            break
+        fi
+    done
+    if [[ -z "${XRAY_BIN}" ]] && command -v xray &>/dev/null; then
         CMD_XRAY="$(command -v xray)"
         if file -b "${CMD_XRAY}" | grep -q "Mach-O"; then
             XRAY_BIN="${CMD_XRAY}"
+        fi
+    fi
+    if [[ -z "${XRAY_BIN}" && "${TARGET_USER}" != "root" ]]; then
+        echo -e "    ${C_YELLOW}[i] Attempting to install xray via Homebrew...${C_RESET}"
+        if su - "${TARGET_USER}" -c "command -v brew &>/dev/null && brew install xray"; then
+            for cand in /opt/homebrew/bin/xray /usr/local/bin/xray; do
+                if [[ -f "${cand}" ]] && file -b "${cand}" | grep -q "Mach-O"; then
+                    XRAY_BIN="${cand}"
+                    break
+                fi
+            done
         fi
     fi
     if [[ -n "${XRAY_BIN}" ]]; then

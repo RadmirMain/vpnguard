@@ -279,4 +279,17 @@ final class VPNGuardAppTests: XCTestCase {
         XCTAssertFalse(VPNGuardViewModel.isValidDomainHost("-bad.example.com"))
         XCTAssertFalse(VPNGuardViewModel.isValidDomainHost("203.0.113.10"))
     }
+
+    func testStage3FormattersCountdownAndIconCache() {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        XCTAssertEqual(VGFormatters.formatCountdown(until: base.addingTimeInterval(299), now: base), "04:59")
+        XCTAssertEqual(VGFormatters.formatCountdown(until: base.addingTimeInterval(1), now: base), "00:01")
+        XCTAssertNil(VGFormatters.formatCountdown(until: base.addingTimeInterval(-1), now: base))
+
+        let rendered = VGFormatters.attributedLogs(from: "ERROR foo fail foo bar", searchQuery: "foo")
+        XCTAssertEqual(String(rendered.characters), "ERROR foo fail foo bar")
+
+        XCTAssertTrue(AppIconCache.shared.exists("/bin/ls"))
+        XCTAssertFalse(AppIconCache.shared.exists("/nonexistent/vpnguard-missing-binary"))
+    }
 }

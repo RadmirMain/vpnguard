@@ -28,6 +28,8 @@ public struct DiagnosticsView: View {
     @State private var wordWrapEnabled: Bool = true
     @State private var logSearchQuery: String = ""
     @State private var autoRefreshTask: Task<Void, Never>? = nil
+    @State private var renderedAttributedLogs: AttributedString = AttributedString()
+    @State private var renderTask: Task<Void, Never>? = nil
 
     public init(vm: VPNGuardViewModel) {
         self.vm = vm
@@ -105,13 +107,31 @@ public struct DiagnosticsView: View {
             if vm.diagnosticsSnapshot == nil {
                 Task { await vm.loadDiagnosticsLogs(silent: true) }
             }
+            scheduleLogRender(debounced: false)
             updateAutoRefreshLoop()
         }
         .onDisappear {
+            renderTask?.cancel()
+            renderTask = nil
             stopAutoRefreshLoop()
         }
         .onChange(of: autoRefreshEnabled) { _, _ in
             updateAutoRefreshLoop()
+        }
+        .onChange(of: selectedTab) { _, nextTab in
+            updateAutoRefreshLoop()
+            if nextTab == .logs {
+                scheduleLogRender(debounced: false)
+            }
+        }
+        .onChange(of: selectedSource) { _, _ in
+            scheduleLogRender(debounced: false)
+        }
+        .onChange(of: vm.diagnosticsSnapshot?.generatedAt) { _, _ in
+            scheduleLogRender(debounced: false)
+        }
+        .onChange(of: logSearchQuery) { _, _ in
+            scheduleLogRender(debounced: true)
         }
     }
 
@@ -283,18 +303,18 @@ public struct DiagnosticsView: View {
                         .frame(width: 200)
                 }
 
-                // Clean ANSI-stripped & highlighted log viewer
+                // Clean ANSI-stripped & highlighted log viewer (rendered asynchronously off body)
                 Group {
                     if wordWrapEnabled {
                         ScrollView(.vertical) {
-                            Text(VGFormatters.attributedLogs(from: filteredRawText, searchQuery: logSearchQuery))
+                            Text(renderedAttributedLogs)
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(12)
                         }
                     } else {
                         ScrollView([.vertical, .horizontal]) {
-                            Text(VGFormatters.attributedLogs(from: filteredRawText, searchQuery: logSearchQuery))
+                            Text(renderedAttributedLogs)
                                 .textSelection(.enabled)
                                 .fixedSize(horizontal: true, vertical: false)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -337,13 +357,30 @@ public struct DiagnosticsView: View {
         return lines.joined(separator: "\n")
     }
 
+    private func scheduleLogRender(debounced: Bool) {
+        renderTask?.cancel()
+        let rawText = filteredRawText
+        let query = logSearchQuery
+        renderTask = Task { @MainActor in
+            if debounced {
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                guard !Task.isCancelled else { return }
+            }
+            let rendered = await Task.detached(priority: .userInitiated) {
+                VGFormatters.attributedLogs(from: rawText, searchQuery: query)
+            }.value
+            guard !Task.isCancelled else { return }
+            self.renderedAttributedLogs = rendered
+        }
+    }
+
     private func updateAutoRefreshLoop() {
         stopAutoRefreshLoop()
-        guard autoRefreshEnabled else { return }
+        guard selectedTab == .logs && autoRefreshEnabled else { return }
         autoRefreshTask = Task { @MainActor in
-            while !Task.isCancelled && autoRefreshEnabled {
+            while !Task.isCancelled && autoRefreshEnabled && selectedTab == .logs {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard !Task.isCancelled && autoRefreshEnabled else { break }
+                guard !Task.isCancelled && autoRefreshEnabled && selectedTab == .logs else { break }
                 await vm.loadDiagnosticsLogs(silent: true)
             }
         }

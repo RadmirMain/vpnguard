@@ -17,18 +17,22 @@ public struct VPNGuardApp: App {
             }
         } label: {
             HStack(spacing: 4) {
-                if vm.pauseRemainingSeconds > 0 {
-                    Image(systemName: "clock.arrow.circlepath")
-                        .foregroundColor(.orange)
-                    if let countdown = vm.menuBarPauseText {
-                        Text(countdown)
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .monospacedDigit()
-                            .foregroundColor(.orange)
+                if let pauseEnd = vm.pauseEndDate, vm.isPauseActive {
+                    TimelineView(.periodic(from: .now, by: 1.0)) { context in
+                        HStack(spacing: 4) {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .foregroundColor(.orange)
+                            if let countdown = VGFormatters.formatCountdown(until: pauseEnd, now: context.date) {
+                                Text(countdown)
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .monospacedDigit()
+                                    .foregroundColor(.orange)
+                            }
+                        }
                     }
                 } else {
-                    Image(systemName: vm.isProtectionActive ? "shield.fill" : "shield.slash.fill")
-                        .foregroundColor(vm.isProtectionActive ? .green : .secondary)
+                    Image(systemName: vm.isProtectionActive ? "shield.fill" : (vm.isTunnelRecovering ? "exclamationmark.shield.fill" : "shield.slash.fill"))
+                        .foregroundColor(vm.isProtectionActive ? .green : (vm.isTunnelRecovering ? .orange : .secondary))
                 }
             }
         }

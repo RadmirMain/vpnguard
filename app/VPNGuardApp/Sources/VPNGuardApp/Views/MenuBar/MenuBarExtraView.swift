@@ -28,8 +28,8 @@ public struct MenuBarExtraView: View {
             }
 
             // MARK: - Public Wi-Fi Pause Banner / Action
-            if let countdown = vm.menuBarPauseText {
-                activePauseBanner(countdown: countdown)
+            if let pauseEnd = vm.pauseEndDate, vm.isPauseActive {
+                activePauseBanner(endDate: pauseEnd)
             } else if vm.isProtectionActive {
                 pauseActionRow
             }
@@ -88,7 +88,7 @@ public struct MenuBarExtraView: View {
 
     // MARK: - Status Header
     private var statusHeader: some View {
-        let isPaused = vm.pauseRemainingSeconds > 0
+        let isPaused = vm.isPauseActive
         let isRecovering = vm.isTunnelRecovering
         let tint: Color = vm.isProtectionActive
             ? VGTheme.statusProtected
@@ -112,11 +112,21 @@ public struct MenuBarExtraView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.primary)
 
-                    Text(headerSubtitle)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if let pauseEnd = vm.pauseEndDate, isPaused {
+                        TimelineView(.periodic(from: .now, by: 1.0)) { context in
+                            let countdown = VGFormatters.formatCountdown(until: pauseEnd, now: context.date) ?? "00:00"
+                            Text("Автовозврат через \(countdown)")
+                                .font(.system(size: 11))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text(headerSubtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
 
                 Spacer(minLength: 8)
@@ -182,7 +192,7 @@ public struct MenuBarExtraView: View {
         }
     }
 
-    private func activePauseBanner(countdown: String) -> some View {
+    private func activePauseBanner(endDate: Date) -> some View {
         VGCard(padding: 10, accentBorder: VGTheme.statusWarning.opacity(0.35)) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
@@ -193,10 +203,12 @@ public struct MenuBarExtraView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.primary)
                     Spacer()
-                    Text(countdown)
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
-                        .monospacedDigit()
-                        .foregroundStyle(VGTheme.statusWarning)
+                    TimelineView(.periodic(from: .now, by: 1.0)) { context in
+                        Text(VGFormatters.formatCountdown(until: endDate, now: context.date) ?? "00:00")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundStyle(VGTheme.statusWarning)
+                    }
                 }
 
                 HStack(spacing: 8) {

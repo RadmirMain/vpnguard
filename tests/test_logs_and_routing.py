@@ -62,6 +62,104 @@ class TestLogsAndRouting(unittest.TestCase):
         self.assertIn("ss://[REDACTED]", cleaned)
         self.assertIn("vmess://[REDACTED]", cleaned)
 
+    def test_tail_file_lines_handles_empty_missing_large_and_utf8_chunk_boundary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing = os.path.join(tmpdir, "missing.log")
+            self.assertIn("Файл не найден", vpnguard._tail_file_lines(missing))
+
+            empty = os.path.join(tmpdir, "empty.log")
+            with open(empty, "wb"):
+                pass
+            self.assertEqual(vpnguard._tail_file_lines(empty), "(Лог пуст)")
+
+            # Write > 100 KB file so multiple 8192-byte seek chunks are crossed with multibyte UTF-8
+            large = os.path.join(tmpdir, "large_utf8.log")
+            total_lines = 1500
+            with open(large, "w", encoding="utf-8") as f:
+                for i in range(total_lines):
+                    f.write(f"line-{i:04d} 🔒 Запись кириллицы №{i} payload=abcdef0123456789\n")
+
+            tail = vpnguard._tail_file_lines(large, max_lines=150)
+            lines = tail.splitlines()
+            self.assertEqual(len(lines), 150)
+            self.assertTrue(lines[0].startswith("line-1350 "))
+            self.assertTrue(lines[-1].startswith("line-1499 "))
+            self.assertNotIn("\ufffd", tail)
+            self.assertIn("🔒 Запись кириллицы №1499", tail)
+
+    def test_rotate_log_if_needed_before_daemon_restart(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "vpnguard-singbox.log")
+            with open(log_path, "wb") as f:
+                f.write(b"a" * 100)
+
+            self.assertFalse(vpnguard.rotate_log_if_needed(log_path, max_bytes=200))
+            self.assertFalse(os.path.exists(f"{log_path}.1"))
+
+            self.assertTrue(vpnguard.rotate_log_if_needed(log_path, max_bytes=50))
+            self.assertTrue(os.path.exists(f"{log_path}.1"))
+            with open(f"{log_path}.1", "rb") as f:
+                self.assertEqual(len(f.read()), 100)
+            with open(log_path, "rb") as f:
+                self.assertEqual(f.read(), b"")
+
+    def test_get_pf_status_uses_single_verbose_rules_query_and_parses_blocked_packets(self):
+        rules_v_output = (
+            "pass quick on lo0 inet proto tcp from 127.0.0.0/8 to 127.0.0.0/8 group = 888\n"
+            "  [ Evaluations: 100        Packets: 50         Bytes: 4000        States: 1     ]\n"
+            "pass out quick inet proto tcp all group = 890\n"
+            "  [ Evaluations: 20         Packets: 10         Bytes: 800         States: 0     ]\n"
+            "block return out quick all\n"
+            "  [ Evaluations: 300        Packets: 42         Bytes: 2688        States: 0     ]\n"
+        )
+        calls = []
+
+        def fake_run_pfctl(args, timeout=5.0):
+            calls.append(args)
+            if args == ["-s", "info"]:
+                return mock.MagicMock(returncode=0, stdout="Status: Enabled\n")
+            if args == ["-sr"]:
+                return mock.MagicMock(returncode=0, stdout='anchor "vpnguard" all\n')
+            if args == ["-a", "vpnguard", "-s", "rules", "-v"]:
+                return mock.MagicMock(returncode=0, stdout=rules_v_output)
+            if args == ["-a", "vpnguard/egress", "-s", "rules"]:
+                return mock.MagicMock(returncode=0, stdout="pass out quick inet proto tcp from any to 203.0.113.10 port = 443 group = 889\n")
+            return mock.MagicMock(returncode=1, stdout="")
+
+        with mock.patch.object(vpnguard, "_run_pfctl", side_effect=fake_run_pfctl):
+            st = vpnguard.get_pf_status()
+
+        self.assertEqual(calls.count(["-a", "vpnguard", "-s", "rules", "-v"]), 1)
+        self.assertFalse(["-a", "vpnguard", "-s", "rules"] in calls)
+        self.assertEqual(st["blocked_packets"], 42)
+        self.assertEqual(st["rules_count"], 4)  # 3 main anchor rules + 1 egress rule
+        self.assertTrue(st["has_group_888"])
+        self.assertTrue(st["has_group_889"])
+        self.assertTrue(st["has_group_890"])
+        self.assertTrue(st["has_global_killswitch"])
+
+    def test_sync_system_dns_skips_inactive_interfaces_and_flushes_only_on_change(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backup_path = os.path.join(tmpdir, "dns_backup.json")
+            ns_order = (
+                "An asterisk (*) denotes that a network service is disabled.\n"
+                "(1) Wi-Fi\n"
+                "(Hardware Port: Wi-Fi, Device: en0)\n"
+                "(2) USB 10/100/1000 LAN\n"
+                "(Hardware Port: USB 10/100/1000 LAN, Device: en5)\n"
+            )
+            with mock.patch.object(vpnguard, "DNS_BACKUP_PATH", backup_path), \
+                 mock.patch.object(vpnguard, "_get_active_en_interfaces", return_value={"en0"}), \
+                 mock.patch.object(vpnguard, "_get_service_dns", return_value=["1.1.1.1"]), \
+                 mock.patch.object(vpnguard, "_set_service_dns") as set_mock, \
+                 mock.patch.object(vpnguard, "flush_dns_cache") as flush_mock, \
+                 mock.patch("subprocess.run", return_value=mock.MagicMock(returncode=0, stdout=ns_order)):
+                ok, _ = vpnguard.sync_system_dns()
+
+            self.assertTrue(ok)
+            set_mock.assert_not_called()
+            flush_mock.assert_not_called()
+
     def test_cmd_logs_json_returns_tail_150_and_redacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sb_log = os.path.join(tmpdir, "sb.log")

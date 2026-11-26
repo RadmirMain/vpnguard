@@ -19,8 +19,26 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-TARGET_USER="${SUDO_USER:-$(id -un)}"
+TARGET_USER="${SUDO_USER:-}"
+if [[ -z "${TARGET_USER}" || "${TARGET_USER}" == "root" ]]; then
+    CONSOLE_USER="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+    if [[ -n "${CONSOLE_USER}" && "${CONSOLE_USER}" != "root" ]]; then
+        TARGET_USER="${CONSOLE_USER}"
+    else
+        TARGET_USER="$(id -un)"
+    fi
+fi
+TARGET_UID="$(id -u "${TARGET_USER}" 2>/dev/null || true)"
 TARGET_HOME=$(dscl . -read "/Users/${TARGET_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || echo "/Users/${TARGET_USER}")
+
+# Stop desktop app and any running pause watcher before unloading daemons
+pkill -x "VPNGuardApp" 2>/dev/null || true
+if [[ -f "/var/run/vpnguard/pause_watcher.pid" ]]; then
+    PW_PID="$(tr -d '[:space:]' < /var/run/vpnguard/pause_watcher.pid 2>/dev/null || true)"
+    if [[ "${PW_PID}" =~ ^[0-9]+$ ]] && ps -p "${PW_PID}" -o command= 2>/dev/null | grep -q "pause-watcher"; then
+        kill -9 "${PW_PID}" 2>/dev/null || true
+    fi
+fi
 
 # 0. Restore system DNS if backup exists
 echo -e "${C_BOLD}[1/7] Restoring system DNS settings (if managed)...${C_RESET}"
@@ -28,7 +46,7 @@ if [[ -x "/usr/local/bin/vpnguard" ]]; then
     /usr/local/bin/vpnguard off >/dev/null 2>&1 || true
 fi
 
-# 1. Unload and remove LaunchDaemons
+# 1. Unload and remove LaunchDaemons & LaunchAgent
 echo -e "${C_BOLD}[2/7] Stopping and removing LaunchDaemons & LaunchAgent...${C_RESET}"
 launchctl bootout system/com.vpnguard.xray 2>/dev/null || true
 launchctl unload /Library/LaunchDaemons/com.vpnguard.xray.plist 2>/dev/null || true
@@ -46,7 +64,10 @@ rm -f /usr/local/libexec/vpnguard-pf-boot.sh
 rm -f /usr/local/libexec/vpnguard-xray
 rm -f /usr/local/libexec/vpnguard-singbox
 
-if [[ -n "${TARGET_HOME}" && -f "${TARGET_HOME}/Library/LaunchAgents/com.vpnguard.app.plist" ]]; then
+if [[ -n "${TARGET_HOME}" && "${TARGET_USER}" != "root" && -f "${TARGET_HOME}/Library/LaunchAgents/com.vpnguard.app.plist" ]]; then
+    if [[ -n "${TARGET_UID}" && "${TARGET_UID}" != "0" ]]; then
+        launchctl bootout "gui/${TARGET_UID}/com.vpnguard.app" 2>/dev/null || true
+    fi
     rm -f "${TARGET_HOME}/Library/LaunchAgents/com.vpnguard.app.plist"
 fi
 echo -e "    ${C_GREEN}✓ LaunchDaemons stopped and removed${C_RESET}"
@@ -91,7 +112,9 @@ rm -f /usr/local/bin/vpnguard
 rm -f /usr/local/bin/vpnguard-browser
 rm -rf /usr/local/share/vpnguard
 rm -rf /usr/local/etc/vpnguard
-rm -f /var/log/vpnguard.log /var/log/vpnguard-xray.log /var/log/vpnguard-singbox.log
+rm -f /var/log/vpnguard.log /var/log/vpnguard.log.1 \
+      /var/log/vpnguard-xray.log /var/log/vpnguard-xray.log.1 \
+      /var/log/vpnguard-singbox.log /var/log/vpnguard-singbox.log.1
 rm -rf /Applications/VPNGuard.app
 echo -e "    ${C_GREEN}✓ Binaries, configs, logs, and app removed${C_RESET}"
 

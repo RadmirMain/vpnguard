@@ -454,13 +454,7 @@ public final class VPNGuardService {
         }
     }
 
-    // MARK: - Real Upstream Tunnel Health Probe (via 127.0.0.1:18089)
-    public func measureTunnelHealth() async -> (ok: Bool, latencyMs: Int?, error: String?) {
-        let probeUrls = [
-            "https://cp.cloudflare.com/generate_204",
-            "https://www.gstatic.com/generate_204"
-        ]
-
+    private lazy var healthProbeSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 4.0
         config.timeoutIntervalForResource = 5.0
@@ -475,9 +469,17 @@ public final class VPNGuardService {
             kCFNetworkProxiesHTTPSProxy as String: "127.0.0.1",
             kCFNetworkProxiesHTTPSPort as String: 18089
         ]
+        return URLSession(configuration: config)
+    }()
 
-        let session = URLSession(configuration: config)
-        defer { session.invalidateAndCancel() }
+    // MARK: - Real Upstream Tunnel Health Probe (via 127.0.0.1:18089)
+    public func measureTunnelHealth() async -> (ok: Bool, latencyMs: Int?, error: String?) {
+        let probeUrls = [
+            "https://cp.cloudflare.com/generate_204",
+            "https://www.gstatic.com/generate_204"
+        ]
+
+        let session = healthProbeSession
 
         var lastError: String? = nil
         for rawUrl in probeUrls {

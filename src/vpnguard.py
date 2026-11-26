@@ -90,6 +90,7 @@ SINGBOX_BIN = "/usr/local/libexec/vpnguard-singbox"
 XRAY_BIN = "/usr/local/libexec/vpnguard-xray"
 MANAGED_DNS_SERVER = "1.1.1.1"
 MAX_STDIN_BYTES = 1024 * 1024  # 1 MiB limit for --stdin payloads
+LOG_ROTATE_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB per daemon log before safe .1 rotation
 
 DEFAULT_RULES: Dict[str, Any] = {
     "apps": [
@@ -462,9 +463,73 @@ def flush_dns_cache() -> None:
         pass
 
 
-def _list_hardware_network_services() -> List[str]:
+def rotate_log_if_needed(
+    path: str,
+    max_bytes: int = LOG_ROTATE_MAX_BYTES,
+    owner_user: Optional[str] = None,
+    group_name: Optional[str] = None,
+) -> bool:
+    """
+    Rotate log file -> '<path>.1' when size exceeds max_bytes.
+    MUST be called only while the owning daemon is stopped or strictly BEFORE launchctl bootstrap/kickstart
+    so launchd never continues writing to an unlinked inode.
+    """
+    try:
+        if not os.path.exists(path):
+            return False
+        if os.path.getsize(path) <= max_bytes:
+            return False
+        rotated = f"{path}.1"
+        os.replace(path, rotated)
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o640 if group_name else 0o644)
+        os.close(fd)
+        uid = 0
+        gid = 0
+        if owner_user:
+            try:
+                uid = pwd.getpwnam(owner_user).pw_uid
+            except KeyError:
+                uid = 0
+        if group_name:
+            try:
+                gid = grp.getgrnam(group_name).gr_gid
+            except KeyError:
+                gid = 0
+        if owner_user or group_name:
+            try:
+                os.chown(path, uid, gid)
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
+
+
+def _get_active_en_interfaces() -> Optional[set]:
+    """Return active physical en* interfaces (link active or IPv4 assigned), or None if unavailable."""
+    try:
+        res = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=3)
+        if res.returncode != 0 or not res.stdout.strip():
+            return None
+        active = set()
+        current_dev: Optional[str] = None
+        for line in res.stdout.splitlines():
+            if line and not line[0].isspace():
+                iface = line.split(":", 1)[0].strip()
+                current_dev = iface if re.match(r"^en\d+$", iface) else None
+            elif current_dev:
+                stripped = line.strip()
+                if stripped.startswith("status: active") or stripped.startswith("inet "):
+                    active.add(current_dev)
+        return active
+    except Exception:
+        return None
+
+
+def _list_hardware_network_services(active_only: bool = False) -> List[str]:
     """Return enabled macOS network services backed by physical en* interfaces."""
     services: List[str] = []
+    active_devs = _get_active_en_interfaces() if active_only else None
     try:
         res = subprocess.run(["networksetup", "-listnetworkserviceorder"], capture_output=True, text=True, timeout=5)
         if res.returncode != 0:
@@ -481,7 +546,8 @@ def _list_hardware_network_services() -> List[str]:
                 m_dev = re.search(r"Device:\s*([^)]+)\)", line)
                 dev = m_dev.group(1).strip() if m_dev else ""
                 if re.match(r"^en\d+$", dev):
-                    services.append(current_svc)
+                    if active_devs is None or dev in active_devs:
+                        services.append(current_svc)
                 current_svc = None
     except Exception:
         pass
@@ -525,7 +591,7 @@ def sync_system_dns() -> Tuple[bool, str]:
         except Exception:
             backup = {}
 
-    services = _list_hardware_network_services()
+    services = _list_hardware_network_services(active_only=True)
     updated: List[str] = []
     backup_dirty = False
 
@@ -544,7 +610,8 @@ def sync_system_dns() -> Tuple[bool, str]:
         except Exception as e:
             return False, f"Failed saving DNS backup: {e}"
 
-    flush_dns_cache()
+    if updated:
+        flush_dns_cache()
     return True, f"Synced DNS ({MANAGED_DNS_SERVER}) on: {', '.join(updated) if updated else 'all services up to date'}"
 
 
@@ -561,17 +628,17 @@ def restore_system_dns() -> Tuple[bool, str]:
             backup = {}
 
     restored: List[str] = []
-    hardware_services = _list_hardware_network_services()
+    hardware_services = _list_hardware_network_services(active_only=False)
     targets = list(dict.fromkeys(list(backup.keys()) + hardware_services))
 
     for svc in targets:
         try:
+            current = _get_service_dns(svc)
             if svc in backup:
                 orig = backup[svc] if isinstance(backup[svc], list) else []
-                if _set_service_dns(svc, orig):
+                if current != orig and _set_service_dns(svc, orig):
                     restored.append(svc)
             else:
-                current = _get_service_dns(svc)
                 if current in ([MANAGED_DNS_SERVER], ["172.19.0.2"]):
                     if _set_service_dns(svc, []):
                         restored.append(svc)
@@ -584,7 +651,8 @@ def restore_system_dns() -> Tuple[bool, str]:
         except Exception:
             pass
 
-    flush_dns_cache()
+    if restored:
+        flush_dns_cache()
     return True, f"Restored DNS on: {', '.join(restored) if restored else 'none needed'}"
 
 
@@ -626,6 +694,33 @@ def apply_pf_egress(ips: List[str], port: int) -> Tuple[bool, str]:
         return False, str(e)
 
 
+def _run_pfctl(args: List[str], timeout: float = 5.0) -> Optional[subprocess.CompletedProcess]:
+    """Run pfctl directly as root, or directly via sudo -n when unprivileged (no wasted pre-call)."""
+    cmd = (["pfctl"] + args) if os.geteuid() == 0 else (["sudo", "-n", "pfctl"] + args)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+
+
+def _parse_pf_blocked_packets(lines: List[str]) -> int:
+    """Extract total packets blocked by kill-switch rules from `pfctl -s rules -v` output."""
+    total_blocked = 0
+    is_block_rule = False
+    for line in lines:
+        s = line.strip()
+        if s.startswith("block "):
+            is_block_rule = True
+        elif is_block_rule and "[ Evaluations:" in s and "Packets:" in s:
+            m = re.search(r"Packets:\s*(\d+)", s)
+            if m:
+                total_blocked += int(m.group(1))
+            is_block_rule = False
+        elif not s.startswith("["):
+            is_block_rule = False
+    return total_blocked
+
+
 def get_pf_status() -> Dict[str, Any]:
     """Check macOS Packet Filter status, main anchor, and sub-anchor vpnguard/egress."""
     status = {
@@ -635,6 +730,7 @@ def get_pf_status() -> Dict[str, Any]:
         "rules_count": 0,
         "rules": [],
         "egress_rules": [],
+        "blocked_packets": 0,
         "has_group_888": False,
         "has_group_889": False,
         "has_group_890": False,
@@ -643,23 +739,12 @@ def get_pf_status() -> Dict[str, Any]:
     }
 
     # 1. Check pf enabled
-    try:
-        res_info = subprocess.run(["pfctl", "-s", "info"], capture_output=True, text=True, timeout=5)
-        if res_info.returncode != 0:
-            res_info = subprocess.run(["sudo", "-n", "pfctl", "-s", "info"], capture_output=True, text=True, timeout=5)
-        if res_info.returncode == 0 and "Status: Enabled" in res_info.stdout:
-            status["enabled"] = True
-    except Exception:
-        pass
+    res_info = _run_pfctl(["-s", "info"])
+    if res_info is not None and res_info.returncode == 0 and "Status: Enabled" in res_info.stdout:
+        status["enabled"] = True
 
     # 2. Check main ruleset contains anchor vpnguard
-    res_sr = None
-    try:
-        res_sr = subprocess.run(["pfctl", "-sr"], capture_output=True, text=True, timeout=5)
-        if res_sr.returncode != 0:
-            res_sr = subprocess.run(["sudo", "-n", "pfctl", "-sr"], capture_output=True, text=True, timeout=5)
-    except Exception:
-        res_sr = None
+    res_sr = _run_pfctl(["-sr"])
     if res_sr is not None and res_sr.returncode == 0 and "vpnguard" in res_sr.stdout:
         status["main_anchor_linked"] = True
     elif os.path.exists("/etc/pf.conf"):
@@ -670,30 +755,21 @@ def get_pf_status() -> Dict[str, Any]:
         except Exception:
             pass
 
-    # 3. Check rules inside anchor vpnguard
-    try:
-        res_rules = subprocess.run(["pfctl", "-a", "vpnguard", "-s", "rules"], capture_output=True, text=True, timeout=5)
-        if res_rules.returncode != 0:
-            res_rules = subprocess.run(["sudo", "-n", "pfctl", "-a", "vpnguard", "-s", "rules"], capture_output=True, text=True, timeout=5)
-        if res_rules.returncode == 0:
-            lines = [line.strip() for line in res_rules.stdout.strip().split("\n") if line.strip()]
-            status["rules"] = lines
-            status["rules_count"] = len(lines)
-            status["anchor_loaded"] = len(lines) > 0
-            status["has_group_888"] = any("888" in l for l in lines)
-            status["has_group_890"] = any("890" in l for l in lines)
-            status["has_global_killswitch"] = any("block return out quick" in l for l in lines)
-    except Exception:
-        pass
+    # 3. Single `-s rules -v` query covers rules AND blocked packet counters
+    res_rules = _run_pfctl(["-a", "vpnguard", "-s", "rules", "-v"])
+    if res_rules is not None and res_rules.returncode == 0:
+        raw_lines = res_rules.stdout.splitlines()
+        status["blocked_packets"] = _parse_pf_blocked_packets(raw_lines)
+        lines = [line.strip() for line in raw_lines if line.strip() and not line.strip().startswith("[")]
+        status["rules"] = lines
+        status["rules_count"] = len(lines)
+        status["anchor_loaded"] = len(lines) > 0
+        status["has_group_888"] = any("888" in l for l in lines)
+        status["has_group_890"] = any("890" in l for l in lines)
+        status["has_global_killswitch"] = any("block return out quick" in l for l in lines)
 
     # 4. Check rules inside sub-anchor vpnguard/egress
-    res_egress = None
-    try:
-        res_egress = subprocess.run(["pfctl", "-a", "vpnguard/egress", "-s", "rules"], capture_output=True, text=True, timeout=5)
-        if res_egress.returncode != 0:
-            res_egress = subprocess.run(["sudo", "-n", "pfctl", "-a", "vpnguard/egress", "-s", "rules"], capture_output=True, text=True, timeout=5)
-    except Exception:
-        res_egress = None
+    res_egress = _run_pfctl(["-a", "vpnguard/egress", "-s", "rules"])
     if res_egress is not None and res_egress.returncode == 0 and res_egress.stdout.strip():
         eg_lines = [line.strip() for line in res_egress.stdout.strip().split("\n") if line.strip()]
         status["egress_rules"] = eg_lines
@@ -714,33 +790,10 @@ def get_pf_status() -> Dict[str, Any]:
 
 def get_pf_blocked_packets() -> int:
     """Extract total packets blocked by kill-switch rules inside anchor vpnguard."""
-    cmd = ["pfctl", "-a", "vpnguard", "-s", "rules", "-v"]
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-        if res.returncode != 0:
-            res = subprocess.run(["sudo", "-n"] + cmd, capture_output=True, text=True, timeout=5)
-        if res.returncode != 0:
-            return 0
-    except Exception:
+    res = _run_pfctl(["-a", "vpnguard", "-s", "rules", "-v"])
+    if res is None or res.returncode != 0:
         return 0
-
-    lines = res.stdout.splitlines()
-    total_blocked = 0
-    is_block_rule = False
-
-    for line in lines:
-        s = line.strip()
-        if s.startswith("block "):
-            is_block_rule = True
-        elif is_block_rule and "[ Evaluations:" in s and "Packets:" in s:
-            m = re.search(r"Packets:\s*(\d+)", s)
-            if m:
-                total_blocked += int(m.group(1))
-            is_block_rule = False
-        elif not s.startswith("["):
-            is_block_rule = False
-
-    return total_blocked
+    return _parse_pf_blocked_packets(res.stdout.splitlines())
 
 
 def _get_daemon_pid(service_label: str, exact_proc_name: str) -> Optional[int]:
@@ -1278,7 +1331,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     config = load_config()
     host, socks_port, http_port = resolve_active_proxy(config)
     pf_info = get_pf_status()
-    pf_blocked = get_pf_blocked_packets()
+    pf_blocked = pf_info.get("blocked_packets", 0)
     xray_proc = get_xray_process_status()
     sb_proc = get_singbox_process_status()
     utun_info = get_utun_status()
@@ -1587,16 +1640,6 @@ def _cmd_on_locked(args: argparse.Namespace) -> int:
 
     print(f"\n{C_BOLD}{C_CYAN}=== 🛡️  Enabling VPNGuard Unified System Protection ==={C_RESET}\n")
 
-    # Disconnect conflicting Happ VPN if running
-    try:
-        res_happ = subprocess.run(["scutil", "--nc", "list"], capture_output=True, text=True, timeout=5)
-        if "Connected" in res_happ.stdout and "su.ffg.happ" in res_happ.stdout:
-            print(f"{C_DIM}[i] Disconnecting conflicting Happ.app VPN...{C_RESET}")
-            subprocess.run(["scutil", "--nc", "stop", "Happ"], capture_output=True, timeout=5)
-            time.sleep(1.0)
-    except Exception:
-        pass
-
     # 1. Resolve active relay and prepare pf.egress.conf + sing-box.json BEFORE arming PF
     print(f"{C_BOLD}[1/5] Preparing relay egress & sing-box configuration...{C_RESET}")
     current_rules = DEFAULT_RULES
@@ -1663,6 +1706,7 @@ def _cmd_on_locked(args: argparse.Namespace) -> int:
 
     # 2. Arm PF anchor rules BEFORE starting daemons (Fail-Closed)
     print(f"\n{C_BOLD}[2/5] Arming System Fail-Closed PF Kill-Switch...{C_RESET}")
+    rotate_log_if_needed(LOG_PF_PATH)
     _set_launchd_service_enabled("system/com.vpnguard.pf", True)
     res_pf = subprocess.run(["/usr/local/libexec/vpnguard-pf-boot.sh", "on", "--no-dns-sync"], capture_output=True, text=True, timeout=15)
     if res_pf.returncode == 0:
@@ -1674,6 +1718,7 @@ def _cmd_on_locked(args: argparse.Namespace) -> int:
 
     # 3. Start xray LaunchDaemon (GID 889)
     print(f"\n{C_BOLD}[3/5] Starting vpnguard-xray LaunchDaemon (GID 889)...{C_RESET}")
+    rotate_log_if_needed(LOG_XRAY_PATH, owner_user="_vpnguard_proxy", group_name="vpnguard-proxy")
     _set_launchd_service_enabled("system/com.vpnguard.xray", True)
     subprocess.run(["launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.vpnguard.xray.plist"], capture_output=True, timeout=10)
     subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.xray"], capture_output=True, timeout=10)
@@ -1693,6 +1738,7 @@ def _cmd_on_locked(args: argparse.Namespace) -> int:
 
     # 4. Start sing-box LaunchDaemon (GID 890)
     print(f"\n{C_BOLD}[4/5] Starting vpnguard-singbox LaunchDaemon (GID 890)...{C_RESET}")
+    rotate_log_if_needed(LOG_SINGBOX_PATH)
     _set_launchd_service_enabled("system/com.vpnguard.singbox", True)
     subprocess.run(["launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.vpnguard.singbox.plist"], capture_output=True, timeout=10)
     subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True, timeout=10)
@@ -1723,9 +1769,8 @@ def _cmd_on_locked(args: argparse.Namespace) -> int:
         print(f"{C_RED}[!] PF Kill-Switch is active, but one or more tunnel daemons failed to start.{C_RESET}", file=sys.stderr)
         return 1
 
-    fast_args = argparse.Namespace(**vars(args))
-    fast_args.fast = True
-    return cmd_status(fast_args)
+    print(f"\n{C_BOLD}{C_GREEN}🛡️  VPNGuard fail-closed protection enabled (Xray PID {xray['pid']}, sing-box PID {singbox['pid']}, utun99 active).{C_RESET}\n")
+    return 0
 
 
 def cmd_off(args: argparse.Namespace) -> int:
@@ -1867,13 +1912,35 @@ def cmd_resume_if_expired(args: argparse.Namespace) -> int:
 
 
 def _tail_file_lines(path: str, max_lines: int = 150) -> str:
-    """Read last max_lines from a text log file safely."""
+    """Read last max_lines from a text log file by seeking backwards in binary chunks."""
     if not os.path.exists(path):
         return f"(Файл не найден: {path})"
+    if max_lines <= 0:
+        return "(Лог пуст)"
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            lines = deque(f, maxlen=max_lines)
-        text = "".join(lines).strip()
+        chunk_size = 8192
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            pos = f.tell()
+            if pos == 0:
+                return "(Лог пуст)"
+
+            chunks: List[bytes] = []
+            newline_count = 0
+            # Collect enough chunks from EOF to cover max_lines (even with trailing newline)
+            while pos > 0 and newline_count <= max_lines:
+                read_size = min(chunk_size, pos)
+                pos -= read_size
+                f.seek(pos, os.SEEK_SET)
+                buf = f.read(read_size)
+                chunks.append(buf)
+                newline_count += buf.count(b"\n")
+
+        tail_bytes = b"".join(reversed(chunks))
+        raw_lines = tail_bytes.splitlines()
+        if len(raw_lines) > max_lines:
+            raw_lines = raw_lines[-max_lines:]
+        text = b"\n".join(raw_lines).decode("utf-8", errors="replace").strip()
         return text if text else "(Лог пуст)"
     except Exception as e:
         return f"(Ошибка чтения {path}: {e})"
@@ -2460,7 +2527,6 @@ def parse_vless_uri(uri: str) -> Dict[str, Any]:
 
     log_config = {
         "access": "none",
-        "error": "/var/log/vpnguard-xray.log",
         "loglevel": "warning"
     }
 
@@ -2581,7 +2647,6 @@ def parse_xray_server_json(data: Dict[str, Any], default_name: str = "Imported P
 
     log_config = {
         "access": "none",
-        "error": "/var/log/vpnguard-xray.log",
         "loglevel": "warning"
     }
 
@@ -2816,15 +2881,20 @@ def activate_server(server_id: str, store_path: Optional[str] = None) -> Tuple[b
         if not eg_ok:
             return False, f"Failed updating PF sub-anchor vpnguard/egress: {eg_err}"
 
-        # 2. Atomically replace xray.json (0640 root:vpnguard-proxy) and sing-box.json (0600 root:wheel)
-        atomic_write_text(XRAY_CONF_PATH, json.dumps(xray_config, indent=2, ensure_ascii=False), mode=0o640, group_name="vpnguard-proxy")
+        # 2. Atomically replace xray.json (strip duplicate error file log owned by launchd) and sing-box.json
+        xray_to_write = copy.deepcopy(xray_config)
+        if isinstance(xray_to_write.get("log"), dict) and xray_to_write["log"].get("error") == LOG_XRAY_PATH:
+            xray_to_write["log"].pop("error", None)
+        atomic_write_text(XRAY_CONF_PATH, json.dumps(xray_to_write, indent=2, ensure_ascii=False), mode=0o640, group_name="vpnguard-proxy")
         atomic_write_text(SINGBOX_CONF_PATH, json.dumps(updated_sb, indent=2, ensure_ascii=False), mode=0o600)
 
         # 3. Update store & non-sensitive metadata
         store["activeId"] = server_id
         save_servers_store(store, store_path)
 
-        # 4. Kickstart services
+        # 4. Rotate large daemon logs cleanly before launchctl kickstart reopens descriptors
+        rotate_log_if_needed(LOG_XRAY_PATH, owner_user="_vpnguard_proxy", group_name="vpnguard-proxy")
+        rotate_log_if_needed(LOG_SINGBOX_PATH)
         daemons_restarted = True
         subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.xray"], capture_output=True, timeout=10)
         subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True, timeout=10)
@@ -4050,6 +4120,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             else:
                 print(f"{C_RED}[!] Error: Cursor binary not found at {direct_cursor}!{C_RESET}", file=sys.stderr)
                 return 1
+            user_data_dir = os.path.expanduser("~/.cursor-vpnguard-profile")
         elif ("code" in cmd_name):
             if os.path.exists(direct_code):
                 print(f"{C_CYAN}[i] Bypassing LaunchServices: Launching VS Code Mach-O binary directly...{C_RESET}")
@@ -4057,8 +4128,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             else:
                 print(f"{C_RED}[!] Error: VS Code binary not found at {direct_code}!{C_RESET}", file=sys.stderr)
                 return 1
-
-        user_data_dir = os.path.expanduser("~/.cursor-vpnguard-profile")
+            user_data_dir = os.path.expanduser("~/.vscode-vpnguard-profile")
+        else:
+            user_data_dir = os.path.expanduser("~/.vpnguard-electron-profile")
         flags = [
             f"--proxy-server=http://{host}:{http_port}",
             '--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1',

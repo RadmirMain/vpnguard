@@ -134,17 +134,30 @@ public enum VGFormatters {
         return formatLocalTime(date)
     }
 
-    public static func formatLocalTime(_ date: Date) -> String {
+    private static let localTimeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "ru_RU")
         f.dateFormat = "HH:mm:ss"
-        return f.string(from: date)
+        return f
+    }()
+
+    public static func formatLocalTime(_ date: Date) -> String {
+        localTimeFormatter.string(from: date)
+    }
+
+    public static func formatCountdown(until endDate: Date, now: Date = Date()) -> String? {
+        let remaining = Int(ceil(endDate.timeIntervalSince(now)))
+        guard remaining > 0 else { return nil }
+        let mins = remaining / 60
+        let secs = remaining % 60
+        return String(format: "%02d:%02d", mins, secs)
     }
 
     /// Converts raw ANSI log text into clean AttributedString with semantic level highlighting
     public static func attributedLogs(from raw: String, searchQuery: String = "") -> AttributedString {
         let cleaned = stripANSI(raw)
         let lines = cleaned.components(separatedBy: .newlines)
+        let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         var result = AttributedString()
 
         for (idx, line) in lines.enumerated() {
@@ -162,11 +175,14 @@ public enum VGFormatters {
                 attrLine.foregroundColor = .primary
             }
 
-            // Highlight search query matches softly
-            let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedQuery.isEmpty,
-               let range = attrLine.range(of: trimmedQuery, options: .caseInsensitive) {
-                attrLine[range].backgroundColor = VGTheme.statusWarning.opacity(0.28)
+            // Highlight all search query matches on this line
+            if !trimmedQuery.isEmpty {
+                var searchStart = attrLine.startIndex
+                while searchStart < attrLine.endIndex,
+                      let range = attrLine[searchStart...].range(of: trimmedQuery, options: .caseInsensitive) {
+                    attrLine[range].backgroundColor = VGTheme.statusWarning.opacity(0.28)
+                    searchStart = range.upperBound
+                }
             }
 
             result.append(attrLine)
@@ -175,6 +191,67 @@ public enum VGFormatters {
             }
         }
         return result
+    }
+}
+
+/// Thread-safe in-memory cache for application icons and bundle existence checks.
+public final class AppIconCache: @unchecked Sendable {
+    public static let shared = AppIconCache()
+
+    private let iconCache = NSCache<NSString, NSImage>()
+    private let lock = NSLock()
+    private var existsCache: [String: (exists: Bool, checkedAt: Date)] = [:]
+    private let existsTTL: TimeInterval = 10.0
+
+    private init() {
+        iconCache.countLimit = 256
+    }
+
+    public func exists(_ path: String) -> Bool {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        let now = Date()
+        lock.lock()
+        if let entry = existsCache[trimmed], now.timeIntervalSince(entry.checkedAt) < existsTTL {
+            lock.unlock()
+            return entry.exists
+        }
+        lock.unlock()
+
+        let found = FileManager.default.fileExists(atPath: trimmed)
+        lock.lock()
+        existsCache[trimmed] = (found, now)
+        lock.unlock()
+        return found
+    }
+
+    public func icon(forAppPath path: String) -> NSImage? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let key = trimmed as NSString
+        if let cached = iconCache.object(forKey: key) {
+            return cached
+        }
+        guard exists(trimmed) else { return nil }
+
+        let image = NSWorkspace.shared.icon(forFile: trimmed)
+        iconCache.setObject(image, forKey: key)
+        return image
+    }
+
+    public func iconOrDefault(forAppPath path: String) -> NSImage {
+        if let cached = icon(forAppPath: path) {
+            return cached
+        }
+        let key = path as NSString
+        if let cached = iconCache.object(forKey: key) {
+            return cached
+        }
+        let image = NSWorkspace.shared.icon(forFile: path)
+        iconCache.setObject(image, forKey: key)
+        return image
     }
 }
 
