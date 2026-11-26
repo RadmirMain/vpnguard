@@ -123,7 +123,7 @@ public struct MenuBarExtraView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(vm.isProtectionActive ? "Защита активна" : (isPaused ? "Пауза Public Wi-Fi" : (isRecovering ? "Kill-Switch активен" : "Защита отключена")))
+                    Text(vm.isProtectionActive ? "Защита активна" : (isPaused ? "Авторизация Wi-Fi" : (isRecovering ? "Kill-Switch активен" : "Защита отключена")))
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.primary)
 
@@ -214,7 +214,7 @@ public struct MenuBarExtraView: View {
                     Image(systemName: "wifi.exclamationmark")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(VGTheme.statusWarning)
-                    Text("Временный прямой доступ (Wi-Fi)")
+                    Text("Авторизация Wi-Fi (Captive Portal)")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.primary)
                     Spacer()
@@ -225,6 +225,11 @@ public struct MenuBarExtraView: View {
                             .foregroundStyle(VGTheme.statusWarning)
                     }
                 }
+
+                Text("Трафик вне песочницы (GID 888) временно идёт напрямую. Защита вернётся автоматически после входа или по таймеру.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 8) {
                     Button {
@@ -270,11 +275,11 @@ public struct MenuBarExtraView: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(VGTheme.statusWarning)
                 }
-                Text("Пауза на 5 мин (Public Wi-Fi)")
+                Text("Авторизация Wi-Fi (Captive Portal)")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.primary)
                 Spacer()
-                Text("Автовозврат")
+                Text("5 мин")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
@@ -441,7 +446,7 @@ public struct MenuBarExtraView: View {
                 Image(systemName: "shield.checkered")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
-                Text("Утечек:")
+                Text("Утечек остановлено:")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Text("\(vm.status.pfBlockedPackets)")
@@ -449,6 +454,7 @@ public struct MenuBarExtraView: View {
                     .monospacedDigit()
                     .foregroundStyle(.primary)
             }
+            .help("Количество попыток утечки, заблокированных PF Kill-Switch")
         }
     }
 

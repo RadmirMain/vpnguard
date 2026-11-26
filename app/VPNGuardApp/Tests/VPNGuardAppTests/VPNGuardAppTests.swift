@@ -292,4 +292,72 @@ final class VPNGuardAppTests: XCTestCase {
         XCTAssertTrue(AppIconCache.shared.exists("/bin/ls"))
         XCTAssertFalse(AppIconCache.shared.exists("/nonexistent/vpnguard-missing-binary"))
     }
+
+    func testAuditReportDecodesFourStateAndLegacyJSON() throws {
+        let newJson = """
+        {
+          "passed": false,
+          "total": 4,
+          "passedCount": 1,
+          "degradedCount": 1,
+          "unknownCount": 1,
+          "failedCount": 1,
+          "tests": [
+            {"id": 1, "name": "PF", "passed": true, "status": "pass", "details": "ok"},
+            {"id": 2, "name": "NetWatch", "passed": false, "status": "degraded", "details": "offline"},
+            {"id": 3, "name": "TUN", "passed": false, "status": "unknown", "details": "skipped"},
+            {"id": 4, "name": "Leak", "passed": false, "status": "fail", "details": "escaped"}
+          ]
+        }
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(AuditReport.self, from: newJson)
+        XCTAssertEqual(decoded.degradedCount, 1)
+        XCTAssertEqual(decoded.unknownCount, 1)
+        XCTAssertEqual(decoded.failedCount, 1)
+        XCTAssertEqual(decoded.tests.map(\.status), [.pass, .degraded, .unknown, .fail])
+
+        let legacyJson = """
+        {
+          "passed": false,
+          "total": 2,
+          "passedCount": 1,
+          "failedCount": 1,
+          "tests": [
+            {"id": 1, "name": "PF", "passed": true, "details": "ok"},
+            {"id": 2, "name": "TUN", "passed": false, "details": "bad"}
+          ]
+        }
+        """.data(using: .utf8)!
+        let legacy = try JSONDecoder().decode(AuditReport.self, from: legacyJson)
+        XCTAssertEqual(legacy.tests.map(\.status), [.pass, .fail])
+    }
+
+    func testClashConnectionExplainChainFormatting() {
+        let withRule = ClashConnection(
+            id: "c1",
+            metadata: ClashMetadata(network: "tcp", destinationIP: "1.1.1.1", destinationPort: "443", host: "claude.ai", dnsMode: "normal", processPath: "/Applications/Cursor.app/Contents/MacOS/Cursor"),
+            upload: 100,
+            download: 200,
+            start: "2026-01-01T00:00:00Z",
+            chains: ["xray-upstream"],
+            rule: "DomainSuffix",
+            rulePayload: "claude.ai"
+        )
+        XCTAssertEqual(withRule.ruleDisplay, "DomainSuffix: claude.ai")
+        XCTAssertEqual(withRule.dnsDisplay, "normal")
+        XCTAssertEqual(withRule.chainsDisplay, "xray-upstream")
+
+        let finalConn = ClashConnection(
+            id: "c2",
+            metadata: ClashMetadata(network: "tcp", destinationIP: "8.8.8.8", destinationPort: "443", host: "example.org"),
+            upload: 10,
+            download: 20,
+            start: "2026-01-01T00:00:00Z",
+            chains: ["xray-upstream"],
+            rule: "final",
+            rulePayload: ""
+        )
+        XCTAssertEqual(finalConn.ruleDisplay, "final")
+        XCTAssertEqual(finalConn.dnsDisplay, "—")
+    }
 }

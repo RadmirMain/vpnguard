@@ -87,6 +87,7 @@ public final class VPNGuardViewModel: ObservableObject {
     private var healthProbeCancellable: AnyCancellable?
     private var pauseExpirationTask: Task<Void, Never>?
     private var wakeObserver: NSObjectProtocol?
+    private var sleepObserver: NSObjectProtocol?
     private var pathMonitor: NWPathMonitor?
     private var lastPathSignature: String? = nil
     private var networkChangeTask: Task<Void, Never>?
@@ -202,7 +203,7 @@ public final class VPNGuardViewModel: ObservableObject {
             }
     }
 
-    // MARK: - NWPathMonitor for Automatic Network-Switch DNS & PF Sync
+    // MARK: - NWPathMonitor for UI Network-Switch State Refresh (dns-sync & sync-pf are handled by vpnguard-netwatch)
     private func startNetworkMonitor() {
         let monitor = NWPathMonitor()
         self.pathMonitor = monitor
@@ -229,14 +230,12 @@ public final class VPNGuardViewModel: ObservableObject {
                 guard satisfied else { return }
                 self.networkChangeTask?.cancel()
                 self.networkChangeTask = Task { @MainActor [weak self] in
-                    // Debounce 2.5s (and honor 6s wake grace) to avoid spamming syncDns/syncPfEgress on Wi-Fi flaps
+                    // Debounce 3.5s (and honor 6s wake grace) so headless vpnguard-netwatch completes sync before UI refresh
                     let graceDelay = max(0.0, self?.wakeGraceUntil?.timeIntervalSinceNow ?? 0.0)
-                    let totalNs = UInt64(max(2.5, graceDelay) * 1_000_000_000.0)
+                    let totalNs = UInt64(max(3.5, graceDelay) * 1_000_000_000.0)
                     try? await Task.sleep(nanoseconds: totalNs)
                     guard let self, !Task.isCancelled, self.isNetworkSatisfied else { return }
                     if self.isProtectionActive || self.service.isUtunInterfaceUp(name: "utun99") {
-                        try? await self.service.syncDns()
-                        try? await self.service.syncPfEgress()
                         await self.refreshStatus(fast: false)
                         await self.runTunnelHealthCheck(allowFailover: false)
                     }
@@ -292,6 +291,17 @@ public final class VPNGuardViewModel: ObservableObject {
                 self.status = newStatus
             }
 
+            let activePauseEnd: Date?
+            if newStatus.isProtectionOn {
+                activePauseEnd = nil
+            } else if let ts = newStatus.pauseUntil, ts > Date().timeIntervalSince1970 {
+                activePauseEnd = Date(timeIntervalSince1970: ts)
+            } else if let localEnd = service.readLocalPauseUntil() {
+                activePauseEnd = localEnd
+            } else {
+                activePauseEnd = nil
+            }
+
             if newStatus.isProtectionOn {
                 if let resolvedIp = self.status.exitIp, !resolvedIp.isEmpty {
                     self.protectionState = .on(exitIP: .resolved(resolvedIp))
@@ -300,6 +310,9 @@ public final class VPNGuardViewModel: ObservableObject {
                 } else {
                     self.protectionState = .on(exitIP: .failed)
                 }
+            } else if activePauseEnd != nil {
+                // Captive Portal mode keeps PF armed for GID 888/889/890; do not misclassify as tunnelRecovering
+                self.protectionState = .off
             } else if newStatus.pfEnabled && newStatus.pfRulesCount > 0 {
                 self.protectionState = .tunnelRecovering
             } else {
@@ -307,15 +320,7 @@ public final class VPNGuardViewModel: ObservableObject {
             }
 
             self.statusError = nil
-            if newStatus.isProtectionOn {
-                setPauseEndDate(nil)
-            } else if let ts = newStatus.pauseUntil, ts > Date().timeIntervalSince1970 {
-                setPauseEndDate(Date(timeIntervalSince1970: ts))
-            } else if let localEnd = service.readLocalPauseUntil() {
-                setPauseEndDate(localEnd)
-            } else {
-                setPauseEndDate(nil)
-            }
+            setPauseEndDate(activePauseEnd)
             TrafficMonitorService.shared.configure(url: newStatus.clashApiUrl, secret: newStatus.clashApiSecret)
         } catch {
             guard epoch == stateEpoch, !Task.isCancelled else { return }
@@ -386,13 +391,13 @@ public final class VPNGuardViewModel: ObservableObject {
         exitIpTask?.cancel()
 
         do {
-            showToast("Пауза защиты для входа в Wi-Fi...", isError: false)
+            showToast("Включение режима авторизации Wi-Fi (Captive Portal)...", isError: false)
             let endDate = try await service.pauseProtection(seconds: seconds)
             guard opEpoch == stateEpoch else { return }
             setPauseEndDate(endDate)
             await refreshStatus(fast: true, expectedEpoch: opEpoch)
             let mins = seconds / 60
-            showToast("Пауза на \(mins) мин активна. Защита включится автоматически.", isError: false)
+            showToast("Режим авторизации Wi-Fi (\(mins) мин) активен. Защита вернётся автоматически.", isError: false)
         } catch {
             guard opEpoch == stateEpoch else { return }
             showToast("Ошибка паузы: \(error.localizedDescription)", isError: true)
@@ -447,6 +452,17 @@ public final class VPNGuardViewModel: ObservableObject {
     }
 
     private func startWakeObserver() {
+        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isPauseActive else { return }
+                await self.resumeFromPauseNow()
+            }
+        }
+
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
@@ -1023,8 +1039,10 @@ public final class VPNGuardViewModel: ObservableObject {
             self.auditReport = report
             if report.passed {
                 showToast("Все проверки пройдены: Утечек нет!", isError: false)
+            } else if report.failedCount > 0 {
+                showToast("Обнаружены критические ошибки/утечки (\(report.failedCount))", isError: true)
             } else {
-                showToast("Обнаружены несоответствия в тестах (\(report.failedCount))", isError: true)
+                showToast("Аудит: \(report.passedCount) PASS, \(report.degradedCount) DEGRADED, \(report.unknownCount) UNKNOWN", isError: false)
             }
         } catch {
             showToast("Ошибка запуска аудита: \(error.localizedDescription)", isError: true)

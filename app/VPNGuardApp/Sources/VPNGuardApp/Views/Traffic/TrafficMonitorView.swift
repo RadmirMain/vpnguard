@@ -13,6 +13,7 @@ private struct GroupedTrafficEntry: Identifiable {
     let totalDownload: Int64
     let totalUpload: Int64
     let connectionIds: [String]
+    let sampleConnection: ClashConnection
 }
 
 public struct TrafficMonitorView: View {
@@ -23,6 +24,7 @@ public struct TrafficMonitorView: View {
     @State private var selectedFilter: FilterRoute = .all
     @State private var groupByProcessAndHost: Bool = true
     @State private var connectionToClose: ClashConnection? = nil
+    @State private var inspectedConnection: ClashConnection? = nil
     @State private var showCloseAllAlert: Bool = false
     @State private var isHoveringList: Bool = false
     @State private var frozenConnections: [ClashConnection] = []
@@ -90,7 +92,8 @@ public struct TrafficMonitorView: View {
                 connectionCount: items.count,
                 totalDownload: totalDown,
                 totalUpload: totalUp,
-                connectionIds: items.map(\.id)
+                connectionIds: items.map(\.id),
+                sampleConnection: first
             )
         }
         .sorted { ($0.totalDownload + $0.totalUpload) > ($1.totalDownload + $1.totalUpload) }
@@ -254,6 +257,9 @@ public struct TrafficMonitorView: View {
             }
         } message: {
             Text("Это действие принудительно разорвёт все текущие сетевые сессии, проходящие через sing-box.")
+        }
+        .sheet(item: $inspectedConnection) { snapshot in
+            connectionInspectorSheet(snapshot: snapshot)
         }
     }
 
@@ -494,7 +500,15 @@ public struct TrafficMonitorView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .vgHoverRow(cornerRadius: VGTheme.radiusControl)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            inspectedConnection = entry.sampleConnection
+        }
         .contextMenu {
+            Button("Инспектор маршрута (Explain)") {
+                inspectedConnection = entry.sampleConnection
+            }
+            Divider()
             ruleContextMenuItems(host: entry.destinationHost, processPath: entry.processPath)
         }
     }
@@ -602,7 +616,15 @@ public struct TrafficMonitorView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .vgHoverRow(cornerRadius: VGTheme.radiusControl)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            inspectedConnection = conn
+        }
         .contextMenu {
+            Button("Инспектор маршрута (Explain)") {
+                inspectedConnection = conn
+            }
+            Divider()
             ruleContextMenuItems(host: conn.destinationHost, processPath: conn.metadata.processPath)
             Divider()
             Button("Разорвать соединение", role: .destructive) {
@@ -755,6 +777,93 @@ public struct TrafficMonitorView: View {
         Image(systemName: isProxy ? "shield.fill" : "globe")
             .font(.system(size: 14))
             .foregroundStyle(isProxy ? VGTheme.accentPrimary : VGTheme.statusProtected)
+    }
+
+    // MARK: - Live Runtime Route Inspector Sheet
+    @ViewBuilder
+    private func connectionInspectorSheet(snapshot: ClashConnection) -> some View {
+        let liveConn = monitor.connections.first(where: { $0.id == snapshot.id })
+        let conn = liveConn ?? snapshot
+        let isActive = (liveConn != nil)
+
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                processIconView(path: conn.metadata.processPath, isProxy: conn.isProxy)
+                    .frame(width: 28, height: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Инспектор маршрута (Live Runtime)")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("\(conn.processName) → \(conn.destinationDisplay)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                VGStatusBadge(
+                    isActive ? "Активно" : "Завершено",
+                    tone: isActive ? .protected : .neutral,
+                    showDot: true
+                )
+            }
+
+            Divider().opacity(0.45)
+
+            VStack(alignment: .leading, spacing: 10) {
+                inspectorStepRow(
+                    step: "1. Процесс / Хост",
+                    value: "\(conn.processName) · \(conn.destinationDisplay)",
+                    detail: [conn.metadata.processPath, conn.metadata.destinationIP.map { "IP: \($0)" }, conn.metadata.network?.uppercased()]
+                        .compactMap { $0 }
+                        .joined(separator: " | ")
+                )
+                inspectorStepRow(
+                    step: "2. Сработавшее правило",
+                    value: conn.ruleDisplay,
+                    detail: "Вычислено sing-box в реальном времени (Clash API)"
+                )
+                inspectorStepRow(
+                    step: "3. DNS",
+                    value: conn.dnsDisplay,
+                    detail: "Режим DNS из метаданных соединения"
+                )
+                inspectorStepRow(
+                    step: "4. Маршрут / Выход",
+                    value: conn.chainsDisplay,
+                    detail: conn.isProxy ? "Через VPN-туннель (xray-upstream)" : "Прямой выход (Direct / LAN)"
+                )
+            }
+
+            HStack {
+                Spacer()
+                Button("Закрыть") {
+                    inspectedConnection = nil
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(18)
+        .frame(width: 480)
+    }
+
+    private func inspectorStepRow(step: String, value: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(step)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .textSelection(.enabled)
+            if !detail.isEmpty {
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(VGTheme.surfaceLevel2, in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
     }
 
     private func shortProcessSubtitle(_ path: String?) -> String? {

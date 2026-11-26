@@ -39,6 +39,25 @@ class TestPFSyntax(unittest.TestCase):
         self.assertIn("fe80::/10", res.stdout)
         self.assertIn("ipv6-icmp", res.stdout)
 
+    def test_captive_pf_conf_syntax(self):
+        captive_path = os.path.join(PROJECT_ROOT, "src", "pf", "vpnguard-captive.pf.conf")
+        self.assertTrue(os.path.exists(captive_path), f"File not found: {captive_path}")
+
+        res = subprocess.run(
+            ["pfctl", "-n", "-v", "-f", captive_path],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(
+            res.returncode, 0,
+            f"pfctl syntax check failed:\nStdout: {res.stdout}\nStderr: {res.stderr}"
+        )
+        self.assertIn("group = 888", res.stdout)
+        self.assertIn("group = 889", res.stdout)
+        self.assertIn("group = 890", res.stdout)
+        self.assertIn("pass quick on lo0", res.stdout)
+        self.assertIn("pass out quick all", res.stdout)
+
     def test_dynamic_egress_rule_syntax_non_443(self):
         rule = vpnguard.format_pf_egress_rule(["1.2.3.4", "5.6.7.8"], 8443)
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:

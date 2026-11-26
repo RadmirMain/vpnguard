@@ -60,9 +60,14 @@ launchctl bootout system/com.vpnguard.pf 2>/dev/null || true
 launchctl unload /Library/LaunchDaemons/com.vpnguard.pf.plist 2>/dev/null || true
 rm -f /Library/LaunchDaemons/com.vpnguard.pf.plist
 
+launchctl bootout system/com.vpnguard.netwatch 2>/dev/null || true
+launchctl unload /Library/LaunchDaemons/com.vpnguard.netwatch.plist 2>/dev/null || true
+rm -f /Library/LaunchDaemons/com.vpnguard.netwatch.plist
+
 rm -f /usr/local/libexec/vpnguard-pf-boot.sh
 rm -f /usr/local/libexec/vpnguard-xray
 rm -f /usr/local/libexec/vpnguard-singbox
+rm -f /usr/local/libexec/vpnguard-netwatch
 
 if [[ -n "${TARGET_HOME}" && "${TARGET_USER}" != "root" && -f "${TARGET_HOME}/Library/LaunchAgents/com.vpnguard.app.plist" ]]; then
     if [[ -n "${TARGET_UID}" && "${TARGET_UID}" != "0" ]]; then
@@ -77,6 +82,7 @@ echo -e "${C_BOLD}[3/7] Flushing Packet Filter anchors 'vpnguard/egress' & 'vpng
 pfctl -a "vpnguard/egress" -F all 2>/dev/null || true
 pfctl -a vpnguard -F all 2>/dev/null || true
 rm -f /etc/pf.anchors/vpnguard
+rm -f /etc/pf.anchors/vpnguard-captive
 rm -rf /var/run/vpnguard
 rm -rf /var/db/vpnguard
 echo -e "    ${C_GREEN}✓ PF anchors flushed and removed${C_RESET}"
@@ -114,7 +120,8 @@ rm -rf /usr/local/share/vpnguard
 rm -rf /usr/local/etc/vpnguard
 rm -f /var/log/vpnguard.log /var/log/vpnguard.log.1 \
       /var/log/vpnguard-xray.log /var/log/vpnguard-xray.log.1 \
-      /var/log/vpnguard-singbox.log /var/log/vpnguard-singbox.log.1
+      /var/log/vpnguard-singbox.log /var/log/vpnguard-singbox.log.1 \
+      /var/log/vpnguard-netwatch.log /var/log/vpnguard-netwatch.log.1
 rm -rf /Applications/VPNGuard.app
 echo -e "    ${C_GREEN}✓ Binaries, configs, logs, and app removed${C_RESET}"
 

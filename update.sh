@@ -222,6 +222,10 @@ if [[ "${NEEDS_FRONTEND_UPDATE}" -eq 1 ]]; then
     rsync -a --exclude='__pycache__' --exclude='*.pyc' --exclude='xray/xray.json' --exclude='servers.json' --exclude='.DS_Store' "${SCRIPT_DIR}/src" "${STAGED_APP}/Contents/Resources/backend/"
     rsync -a --exclude='.DS_Store' --exclude='vpnguard-xray' --exclude='vpnguard-exec' "${SCRIPT_DIR}/bin" "${STAGED_APP}/Contents/Resources/backend/"
     clang -Wall -Wextra -Werror -O2 -arch arm64 -o "${STAGED_APP}/Contents/Resources/backend/libexec/vpnguard-exec" "${SCRIPT_DIR}/src/vpnguard_exec.c"
+    if [[ -f "${APP_PKG_DIR}/.build/release/vpnguard-netwatch" ]]; then
+        cp "${APP_PKG_DIR}/.build/release/vpnguard-netwatch" "${STAGED_APP}/Contents/Resources/backend/libexec/vpnguard-netwatch"
+        chmod 755 "${STAGED_APP}/Contents/Resources/backend/libexec/vpnguard-netwatch"
+    fi
     printf '%s\n' "${CURRENT_BACKEND_HASH}" > "${STAGED_APP}/Contents/Resources/backend/backend.sha256"
 
     # Strip extended attributes strictly BEFORE ad-hoc codesign

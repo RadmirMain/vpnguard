@@ -170,9 +170,10 @@ pass out quick proto { tcp, udp } from any to { <ip1>, <ip2> } port <port> group
 - Xray пишет логи через `launchd` (`StandardOutPath`/`StandardErrorPath`) без дублирующего файлового `error`-вывода; `rotate_log_if_needed()` ротирует логи > `8 MiB` в `.1` строго до `bootstrap`/`kickstart`.
 - Команда `vpnguard logs --json` прогоняет хвост логов и состояние `pfctl`/`scutil --dns`/`ifconfig utun99` через `redact_sensitive_text()` (маскирует `vless://`, `trojan://`, `ss://`, `vmess://`, UUID, ключи Reality, `Bearer`-токены, JSON-поля `password`/`psk`/`privateKey`/`token`/`auth`, query-параметры, `api_secret` и адреса/SNI серверов).
 
-### 5.4. Fail-Safe пауза для Captive Portal (`vpnguard pause`)
-- Записывает wall-clock Unix-timestamp в `/var/run/vpnguard/pause_until` (`0644 root:wheel`), отключает PF/sing-box без удаления этого файла и гарантирует ровно один фоновый процесс `pause-watcher` через `/var/run/vpnguard/pause_watcher.pid`.
-- `pause-watcher` проверяет `time.time() >= pause_until` каждые 5с без удержания `flock` во время сна, при истечении перепроверяет время под `acquire_state_lock()`, вызывает `cmd_on()` и удаляет PID-файл в `finally`. `vpnguard on` и `vpnguard off` всегда очищают оба файла и завершают watcher.
+### 5.4. Fail-Safe пауза для Captive Portal (`vpnguard pause`) и Headless Watcher (`vpnguard-netwatch`)
+- **Captive Portal 2.0 (`vpnguard pause`)**: останавливает `sing-box` и `xray`, переводит якорь `vpnguard` на `/etc/pf.anchors/vpnguard-captive` (сохраняя `pfctl -E` токен и блокировку `GID 888/889/890`), восстанавливает DHCP DNS, записывает `pause_until` и случайный `pause_token` в `/var/run/vpnguard/` (`0644 root:wheel`), запуская ровно один `pause-watcher`.
+- `pause-watcher` проверяет дедлайн, детектирует сон через `(dt_wall - dt_mono) > 10.0` и опрашивает `captive.apple.com` через `http.client.HTTPConnection` (без прокси и редиректов, таймаут `2.5 с`, двойной `Success`). Перед возвратом `cmd_on()` проверяет совпадение `pause_token` под `acquire_state_lock()`. При включении защиты `_cmd_on_locked()` сбрасывает старые состояния PF (`pfctl -k`) по физическим IPv4/IPv6 адресам строго до запуска `xray`/`sing-box`.
+- **Headless-демон `vpnguard-netwatch` (`com.vpnguard.netwatch`)**: бинарник на Swift (`Sources/VPNGuardNetWatch/main.swift`) с `SCDynamicStore` (`State:/Network/Global/IPv4`, `State:/Network/Global/DNS`) и `IORegisterForSystemPower` (немедленный `IOAllowPowerChange` на сон, синхронизация через `2.5 с` после пробуждения). Выполняет `dns-sync` и `server sync-pf` последовательно (single-flight, таймаут `15 с` с `proc.terminate()`) только при `desired_state == on` и отсутствии активной captive-паузы, с `5 с` cooldown для DNS-событий.
 
 ---
 
@@ -197,37 +198,40 @@ app/VPNGuardApp/
 ├── Resources/
 │   ├── AppIcon.icns
 │   └── Info.plist
-├── Sources/VPNGuardApp/
-│   ├── App/
-│   │   ├── AppDelegate.swift        # signal(SIGPIPE, SIG_IGN), background MenuBar policy
-│   │   └── VPNGuardApp.swift        # MenuBarExtra (условный TimelineView паузы) & Control Center window
-│   ├── Models/
-│   │   ├── AuditModels.swift
-│   │   ├── DiagnosticsModels.swift  # DiagnosticsLogsSnapshot
-│   │   ├── RulesModels.swift
-│   │   ├── ServerModels.swift       # VlessPreviewParser, ServerPingResult, UpdateCheckResult
-│   │   ├── StatusModels.swift       # ProtectionState (+ .tunnelRecovering), SystemStatus (+ pauseUntil)
-│   │   └── TrafficModels.swift      # ClashConnection, ClashConnectionSnapshot (connections: null -> []), ByteFormatter
-│   ├── Services/
-│   │   ├── AppDiscoveryService.swift
-│   │   ├── CLIExecutor.swift        # stdinData + конкурентный Pipe + немедленный возврат при timeout
-│   │   ├── GitHubReleaseUpdater.swift # Ed25519 + SHA-256 + ETag + backend.sha256 sync + nohup relaunch
-│   │   ├── TrafficMonitorService.swift # WebSocket /connections & /traffic + connectionsVersion
-│   │   └── VPNGuardService.swift    # CLI wrapper, direct browser launcher, reusable URLSession 204 probe, update.sh
-│   ├── ViewModels/
-│   │   └── VPNGuardViewModel.swift  # Параллельный старт, stateEpoch, NWPathMonitor, failover, 1-click upsert
-│   └── Views/
-│       ├── Apps/ (AppPickerSheet.swift, AppsManagementView.swift — стабильный Binding по id + AppIconCache)
-│       ├── Common/ (DesignSystem.swift [AppIconCache, VGFormatters, VGCard], ToastView.swift)
-│       ├── Dashboard/DashboardView.swift
-│       ├── Diagnostics/DiagnosticsView.swift # Асинхронный debounced AttributedString + автообновление только на вкладке логов
-│       ├── MenuBar/MenuBarExtraView.swift    # Pause 5m/15m (TimelineView), Tunnel Health, Browser Launcher, Update Banner
-│       ├── Server/ServerConfigView.swift     # Единый список серверов, AddServerSheet, GID 890 Ping, Auto-Failover
-│       ├── Traffic/TrafficMonitorView.swift  # Кешированная группировка, AppIconCache, parallel withTaskGroup close
-│       ├── Websites/WebsitesManagementView.swift # Стабильный Binding по id
-│       └── MainContainerView.swift           # Monochrome Sidebar + AppUpdateSheetView
+├── Sources/
+│   ├── VPNGuardNetWatch/
+│   │   └── main.swift               # Headless LaunchDaemon: SCDynamicStore + IOKit sleep/wake -> dns-sync & sync-pf
+│   └── VPNGuardApp/
+│       ├── App/
+│       │   ├── AppDelegate.swift        # signal(SIGPIPE, SIG_IGN), background MenuBar policy
+│       │   └── VPNGuardApp.swift        # MenuBarExtra (условный TimelineView паузы) & Control Center window
+│       ├── Models/
+│       │   ├── AuditModels.swift        # AuditStatus (.pass/.degraded/.unknown/.fail), AuditReport
+│       │   ├── DiagnosticsModels.swift  # DiagnosticsLogsSnapshot
+│       │   ├── RulesModels.swift
+│       │   ├── ServerModels.swift       # VlessPreviewParser, ServerPingResult, UpdateCheckResult
+│       │   ├── StatusModels.swift       # ProtectionState (+ .tunnelRecovering), SystemStatus (+ pauseUntil)
+│       │   └── TrafficModels.swift      # ClashConnection (+ ruleDisplay/dnsDisplay/chainsDisplay), ByteFormatter
+│       ├── Services/
+│       │   ├── AppDiscoveryService.swift
+│       │   ├── CLIExecutor.swift        # stdinData + конкурентный Pipe + немедленный возврат при timeout
+│       │   ├── GitHubReleaseUpdater.swift # Ed25519 + SHA-256 + ETag + backend.sha256 sync + nohup relaunch
+│       │   ├── TrafficMonitorService.swift # WebSocket /connections & /traffic + connectionsVersion
+│       │   └── VPNGuardService.swift    # CLI wrapper, direct browser launcher, reusable URLSession 204 probe, update.sh
+│       ├── ViewModels/
+│       │   └── VPNGuardViewModel.swift  # Параллельный старт, stateEpoch, UI NWPathMonitor, willSleep/didWake, failover
+│       └── Views/
+│           ├── Apps/ (AppPickerSheet.swift, AppsManagementView.swift — стабильный Binding по id + AppIconCache)
+│           ├── Common/ (DesignSystem.swift [AppIconCache, VGFormatters, VGCard], ToastView.swift)
+│           ├── Dashboard/DashboardView.swift
+│           ├── Diagnostics/DiagnosticsView.swift # 4-статусный аудит + Darwin.getgroups GID 888 + логи
+│           ├── MenuBar/MenuBarExtraView.swift    # Captive Portal (TimelineView), Tunnel Health, Browser Launcher
+│           ├── Server/ServerConfigView.swift     # Единый список серверов, AddServerSheet, GID 890 Ping, Auto-Failover
+│           ├── Traffic/TrafficMonitorView.swift  # Кешированная группировка, Live Runtime Inspector sheet, 1-click rules
+│           ├── Websites/WebsitesManagementView.swift # Стабильный Binding по id
+│           └── MainContainerView.swift           # Monochrome Sidebar + AppUpdateSheetView
 └── Tests/VPNGuardAppTests/
-    └── VPNGuardAppTests.swift                # 14 unit-тестов (включая null connections, tunnelRecovering, AppIconCache, Ed25519)
+    └── VPNGuardAppTests.swift                # 16 unit-тестов (AuditStatus, Explain chain, tunnelRecovering, Ed25519)
 ```
 
 ---
@@ -244,8 +248,10 @@ app/VPNGuardApp/
 | Желаемое состояние VPN | `/var/db/vpnguard/desired_state` | `root:wheel 644` | Персистентный флаг `on`/`off` для загрузки macOS |
 | `sing-box` бинарник | `/usr/local/libexec/vpnguard-singbox` | `root:wheel 755` | TUN daemon Mach-O |
 | `Xray` бинарник | `/usr/local/libexec/vpnguard-xray` | `root:wheel 755` | Proxy daemon Mach-O |
-| PF Bootstrap | `/usr/local/libexec/vpnguard-pf-boot.sh` | `root:wheel 755` | Инициализация и снятие фаервола |
+| PF Bootstrap | `/usr/local/libexec/vpnguard-pf-boot.sh` | `root:wheel 755` | Инициализация, captive-профиль и снятие фаервола |
+| Headless NetWatch | `/usr/local/libexec/vpnguard-netwatch` | `root:wheel 755` | Swift-демон `SCDynamicStore` + `IOKit` sleep/wake |
 | Правила анкора PF | `/etc/pf.anchors/vpnguard` | `root:wheel 644` | Основной анкор PF |
+| Captive-профиль PF | `/etc/pf.anchors/vpnguard-captive` | `root:wheel 644` | Временный анкор PF для Wi-Fi авторизации (блокирует GID 888/889/890) |
 | Динамический egress PF | `/usr/local/etc/vpnguard/pf.egress.conf` | `root:wheel 644` | Sub-anchor `vpnguard/egress` |
 | Sudoers правила | `/etc/sudoers.d/vpnguard` | `root:wheel 440` | Точные правила без `*` |
 | Секрет Clash API | `/usr/local/etc/vpnguard/api_secret` | `root:admin 640` | 32-hex секретный токен |
@@ -259,6 +265,7 @@ app/VPNGuardApp/
 | Блокировка мутаций | `/var/run/vpnguard/state.lock` | `root:wheel 644` | Межпроцессный `flock` состояния CLI |
 | Токен reference-count PF | `/var/run/vpnguard/pf.token` | `root:wheel 600` | Токен `pfctl -E` для корректного `-X` |
 | Таймер паузы Wi-Fi | `/var/run/vpnguard/pause_until` | `root:wheel 644` | Unix-timestamp окончания паузы |
+| Токен паузы Wi-Fi | `/var/run/vpnguard/pause_token` | `root:wheel 644` | Защита `pause-watcher` от гонок с `vpnguard off/on` |
 | PID watcher'а паузы | `/var/run/vpnguard/pause_watcher.pid` | `root:wheel 644` | Защита от дублей watcher |
 | Системные логи сервисов | `/var/log/vpnguard*.log(.1)` | `root:wheel 640` / `_vpnguard_proxy` | Логи PF, sing-box, Xray (ротация 8 MiB -> `.1`) |
 | Пользовательские логи GUI | `~/Library/Logs/VPNGuard/*.log` | `user:staff` | Логи запуска браузера и relaunch-обновлений |

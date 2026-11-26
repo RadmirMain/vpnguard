@@ -7,12 +7,17 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "VPNGuardApp", targets: ["VPNGuardApp"])
+        .executable(name: "VPNGuardApp", targets: ["VPNGuardApp"]),
+        .executable(name: "vpnguard-netwatch", targets: ["VPNGuardNetWatch"])
     ],
     targets: [
         .executableTarget(
             name: "VPNGuardApp",
             path: "Sources/VPNGuardApp"
+        ),
+        .executableTarget(
+            name: "VPNGuardNetWatch",
+            path: "Sources/VPNGuardNetWatch"
         ),
         .testTarget(
             name: "VPNGuardAppTests",

@@ -58,7 +58,8 @@ else
     echo -e "    ${C_GREEN}✓ Group vpnguard (GID 888) already exists${C_RESET}"
 fi
 # Ensure TARGET_USER is NOT in group 888 so normal apps/Chrome cannot access GID 888 browser profile directly
-dscl . -delete /Groups/vpnguard GroupMembership "${TARGET_USER}" 2>/dev/null || true
+dseditgroup -o edit -d "${TARGET_USER}" -t user vpnguard 2>/dev/null || true
+dscl . -delete /Groups/vpnguard GroupMembership 2>/dev/null || true
 
 # Group 889: vpnguard-proxy (dedicated for headless Xray proxy daemon)
 if ! dscl . -read /Groups/vpnguard-proxy &>/dev/null; then
@@ -273,6 +274,37 @@ chmod 644 /Library/LaunchDaemons/com.vpnguard.singbox.plist
 cp "${SCRIPT_DIR}/src/pf/com.vpnguard.pf.plist" /Library/LaunchDaemons/com.vpnguard.pf.plist
 chown root:wheel /Library/LaunchDaemons/com.vpnguard.pf.plist
 chmod 644 /Library/LaunchDaemons/com.vpnguard.pf.plist
+
+if [[ -f "${SCRIPT_DIR}/src/netwatch/com.vpnguard.netwatch.plist" ]]; then
+    cp "${SCRIPT_DIR}/src/netwatch/com.vpnguard.netwatch.plist" /Library/LaunchDaemons/com.vpnguard.netwatch.plist
+    chown root:wheel /Library/LaunchDaemons/com.vpnguard.netwatch.plist
+    chmod 644 /Library/LaunchDaemons/com.vpnguard.netwatch.plist
+fi
+
+NETWATCH_SRC=""
+for nw_cand in \
+    "${SCRIPT_DIR}/libexec/vpnguard-netwatch" \
+    "${SCRIPT_DIR}/app/VPNGuardApp/.build/release/vpnguard-netwatch" \
+    "/Applications/VPNGuard.app/Contents/Resources/backend/libexec/vpnguard-netwatch"; do
+    if [[ -x "${nw_cand}" ]]; then
+        NETWATCH_SRC="${nw_cand}"
+        break
+    fi
+done
+if [[ -z "${NETWATCH_SRC}" && -f "${SCRIPT_DIR}/app/VPNGuardApp/Package.swift" ]] && command -v swift &>/dev/null; then
+    swift build --package-path "${SCRIPT_DIR}/app/VPNGuardApp" -c release --arch arm64 --product vpnguard-netwatch >/dev/null 2>&1 || true
+    if [[ -x "${SCRIPT_DIR}/app/VPNGuardApp/.build/release/vpnguard-netwatch" ]]; then
+        NETWATCH_SRC="${SCRIPT_DIR}/app/VPNGuardApp/.build/release/vpnguard-netwatch"
+    fi
+fi
+if [[ -n "${NETWATCH_SRC}" ]]; then
+    cp -f "${NETWATCH_SRC}" /usr/local/libexec/vpnguard-netwatch
+    chown root:wheel /usr/local/libexec/vpnguard-netwatch
+    chmod 755 /usr/local/libexec/vpnguard-netwatch
+    xattr -c /usr/local/libexec/vpnguard-netwatch 2>/dev/null || true
+    codesign --force -s - /usr/local/libexec/vpnguard-netwatch 2>/dev/null || true
+    echo -e "    ${C_GREEN}✓ Installed /usr/local/libexec/vpnguard-netwatch (root:wheel 755)${C_RESET}"
+fi
 echo -e "    ${C_GREEN}✓ Installed all LaunchDaemons to /Library/LaunchDaemons/${C_RESET}"
 
 # 7. Install PF anchor rules and boot script
@@ -282,12 +314,16 @@ cp "${SCRIPT_DIR}/src/pf/vpnguard.pf.conf" /etc/pf.anchors/vpnguard
 chown root:wheel /etc/pf.anchors/vpnguard
 chmod 644 /etc/pf.anchors/vpnguard
 
+cp "${SCRIPT_DIR}/src/pf/vpnguard-captive.pf.conf" /etc/pf.anchors/vpnguard-captive
+chown root:wheel /etc/pf.anchors/vpnguard-captive
+chmod 644 /etc/pf.anchors/vpnguard-captive
+
 cp "${SCRIPT_DIR}/src/pf/vpnguard-pf-boot.sh" /usr/local/libexec/vpnguard-pf-boot.sh
 chown root:wheel /usr/local/libexec/vpnguard-pf-boot.sh
 chmod 755 /usr/local/libexec/vpnguard-pf-boot.sh
 
-if pfctl -vnf /etc/pf.anchors/vpnguard &>/dev/null; then
-    echo -e "    ${C_GREEN}✓ /etc/pf.anchors/vpnguard syntax verified cleanly${C_RESET}"
+if pfctl -vnf /etc/pf.anchors/vpnguard &>/dev/null && pfctl -vnf /etc/pf.anchors/vpnguard-captive &>/dev/null; then
+    echo -e "    ${C_GREEN}✓ /etc/pf.anchors/vpnguard & vpnguard-captive syntax verified cleanly${C_RESET}"
 else
     echo -e "${C_RED}[!] Error: PF anchor syntax check failed!${C_RESET}"
     exit 1
@@ -444,6 +480,12 @@ else
     launchctl kickstart -k system/com.vpnguard.singbox 2>/dev/null || true
 
     /usr/local/bin/vpnguard dns-sync || true
+fi
+
+if [[ -x "/usr/local/libexec/vpnguard-netwatch" && -f "/Library/LaunchDaemons/com.vpnguard.netwatch.plist" ]]; then
+    launchctl enable system/com.vpnguard.netwatch 2>/dev/null || true
+    launchctl bootout system/com.vpnguard.netwatch 2>/dev/null || true
+    launchctl bootstrap system /Library/LaunchDaemons/com.vpnguard.netwatch.plist 2>/dev/null || launchctl load -w /Library/LaunchDaemons/com.vpnguard.netwatch.plist 2>/dev/null || true
 fi
 
 # Persist backend source hash so update.sh & GitHubReleaseUpdater match identically

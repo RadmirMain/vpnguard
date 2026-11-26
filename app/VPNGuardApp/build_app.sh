@@ -63,6 +63,10 @@ fi
 if [[ -f "${REPO_ROOT}/src/vpnguard_exec.c" ]]; then
     clang -Wall -Wextra -Werror -O2 -arch arm64 -o "${BACKEND_DEST}/libexec/vpnguard-exec" "${REPO_ROOT}/src/vpnguard_exec.c"
 fi
+if [[ -f "${BUILD_DIR}/vpnguard-netwatch" ]]; then
+    cp "${BUILD_DIR}/vpnguard-netwatch" "${BACKEND_DEST}/libexec/vpnguard-netwatch"
+    chmod 755 "${BACKEND_DEST}/libexec/vpnguard-netwatch"
+fi
 (
     cd "${REPO_ROOT}"
     find src bin install.sh -type f \

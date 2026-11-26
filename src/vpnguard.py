@@ -43,6 +43,7 @@ import tempfile
 import fcntl
 import select
 import signal
+import http.client
 import threading
 import contextlib
 from collections import deque
@@ -69,6 +70,7 @@ USER_CONFIG_PATH = os.path.expanduser("~/.vpnguard/config.json")
 RUN_DIR = "/var/run/vpnguard"
 STATE_LOCK_PATH = os.path.join(RUN_DIR, "state.lock")
 PAUSE_UNTIL_FILE = os.path.join(RUN_DIR, "pause_until")
+PAUSE_TOKEN_FILE = os.path.join(RUN_DIR, "pause_token")
 PAUSE_WATCHER_PID_FILE = os.path.join(RUN_DIR, "pause_watcher.pid")
 EXEC_HELPER_PATH = "/usr/local/bin/vpnguard-exec"
 LOCAL_EXEC_HELPER = os.path.join(PROJECT_ROOT, "bin", "vpnguard-exec")
@@ -885,6 +887,19 @@ def get_singbox_process_status() -> Dict[str, Any]:
     return info
 
 
+def get_netwatch_process_status() -> Dict[str, Any]:
+    """Inspect headless vpnguard-netwatch LaunchDaemon status."""
+    pid_val = None
+    try:
+        pid_val = _get_daemon_pid("com.vpnguard.netwatch", "vpnguard-netwatch")
+    except Exception:
+        pid_val = None
+    return {
+        "running": pid_val is not None,
+        "pid": pid_val,
+    }
+
+
 def get_utun_status() -> Dict[str, Any]:
     """Inspect active utun interfaces and sing-box assigned IP."""
     info: Dict[str, Any] = {"active": False, "interface": None, "ip": None}
@@ -1379,10 +1394,21 @@ def cmd_status(args: argparse.Namespace) -> int:
             exit_loc = f"{city}, {country} ({org})" if city else f"{country} ({org})"
 
         pause_ts = _read_pause_until()
+        pause_token = _read_pause_token()
         active_pause_until = pause_ts if (not is_on and pause_ts is not None and pause_ts > time.time()) else None
+        captive_pause_active = bool((not is_on) and (pause_token is not None or active_pause_until is not None))
+        netwatch_proc = get_netwatch_process_status()
+        pf_active = bool(pf_info["enabled"] and pf_info["anchor_loaded"])
+        utun_active = bool(utun_info["active"])
+        cores_alive = bool(sb_proc["running"] and xray_proc["running"])
 
         status_data = {
             "isProtectionOn": is_on,
+            "pf_active": pf_active,
+            "utun_active": utun_active,
+            "cores_alive": cores_alive,
+            "netwatch_active": bool(netwatch_proc["running"]),
+            "captive_pause_active": captive_pause_active,
             "pfEnabled": pf_info["enabled"],
             "pfRulesCount": pf_info["rules_count"],
             "pfBlockedPackets": pf_blocked,
@@ -1545,6 +1571,19 @@ def _read_pause_until(pause_file: Optional[str] = None) -> Optional[int]:
         return None
 
 
+def _read_pause_token(token_file: Optional[str] = None) -> Optional[str]:
+    """Read active pause_token from file, or None if missing/empty."""
+    target_file = token_file or PAUSE_TOKEN_FILE
+    if not os.path.exists(target_file):
+        return None
+    try:
+        with open(target_file, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+        return raw or None
+    except Exception:
+        return None
+
+
 def _is_pause_watcher_alive(pid_file: Optional[str] = None) -> Optional[int]:
     """Return PID if an active vpnguard pause-watcher process is running, else None."""
     target_file = pid_file or PAUSE_WATCHER_PID_FILE
@@ -1565,9 +1604,10 @@ def _is_pause_watcher_alive(pid_file: Optional[str] = None) -> Optional[int]:
 
 
 def _clear_pause_state(run_dir: Optional[str] = None, kill_watcher: bool = True) -> None:
-    """Remove pause_until / pause_watcher.pid and terminate any active pause-watcher."""
+    """Remove pause_until / pause_token / pause_watcher.pid and terminate any active pause-watcher."""
     target_dir = run_dir or RUN_DIR
     pause_file = os.path.join(target_dir, "pause_until")
+    token_file = os.path.join(target_dir, "pause_token")
     pid_file = os.path.join(target_dir, "pause_watcher.pid")
 
     if kill_watcher:
@@ -1579,12 +1619,135 @@ def _clear_pause_state(run_dir: Optional[str] = None, kill_watcher: bool = True)
             except Exception:
                 pass
 
-    for path in (pause_file, pid_file):
+    for path in (pause_file, token_file, pid_file):
         if os.path.exists(path):
             try:
                 os.remove(path)
             except Exception:
                 pass
+
+
+def _extract_non_tunnel_interface_ips(ifconfig_output: str) -> Tuple[List[str], List[str]]:
+    """Parse ifconfig output and return (ipv4_list, ipv6_list) for physical/non-tunnel interfaces."""
+    ipv4s: List[str] = []
+    ipv6s: List[str] = []
+    current_iface = ""
+
+    for line in ifconfig_output.splitlines():
+        if line and not line[0].isspace():
+            current_iface = line.split(":", 1)[0].strip()
+            continue
+
+        if not current_iface or current_iface.startswith("lo") or current_iface.startswith("utun"):
+            continue
+
+        stripped = line.strip()
+        if stripped.startswith("inet "):
+            parts = stripped.split()
+            if len(parts) >= 2:
+                raw_ip = parts[1]
+                try:
+                    addr = ipaddress.ip_address(raw_ip)
+                    if addr.version == 4 and not addr.is_loopback and raw_ip not in ipv4s:
+                        ipv4s.append(raw_ip)
+                except ValueError:
+                    pass
+        elif stripped.startswith("inet6 "):
+            parts = stripped.split()
+            if len(parts) >= 2:
+                raw_ip = parts[1].split("%", 1)[0]
+                try:
+                    addr = ipaddress.ip_address(raw_ip)
+                    if addr.version == 6 and not addr.is_loopback and not addr.is_link_local and raw_ip not in ipv6s:
+                        ipv6s.append(raw_ip)
+                except ValueError:
+                    pass
+
+    return ipv4s, ipv6s
+
+
+def _kill_non_tunnel_pf_states() -> None:
+    """Best-effort kill of existing PF states on physical interfaces (preserving lo0/utun99)."""
+    try:
+        res = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5)
+        if res.returncode != 0:
+            return
+    except Exception:
+        return
+
+    ipv4s, ipv6s = _extract_non_tunnel_interface_ips(res.stdout)
+    for ip in ipv4s:
+        for cmd in (["pfctl", "-k", ip], ["pfctl", "-k", "0.0.0.0/0", "-k", ip]):
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=3)
+            except Exception:
+                pass
+    for ip in ipv6s:
+        for cmd in (["pfctl", "-k", ip], ["pfctl", "-k", "::/0", "-k", ip]):
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=3)
+            except Exception:
+                pass
+
+
+def _check_captive_portal_success(timeout: float = 2.5) -> bool:
+    """Directly probe captive.apple.com without proxies or redirects; True only on HTTP 200 + Success."""
+    conn: Optional[http.client.HTTPConnection] = None
+    try:
+        conn = http.client.HTTPConnection("captive.apple.com", 80, timeout=timeout)
+        conn.request(
+            "GET",
+            "/hotspot-detect.html",
+            headers={
+                "Host": "captive.apple.com",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "Connection": "close",
+                "User-Agent": "CaptiveNetworkSupport/1.0 wispr",
+            },
+        )
+        resp = conn.getresponse()
+        body = resp.read(4096).decode("utf-8", errors="ignore")
+        if resp.status != 200:
+            return False
+        return ("<BODY>Success</BODY>" in body) or ("<TITLE>Success</TITLE>" in body)
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _enter_captive_portal_mode(quiet: bool = False) -> None:
+    """Stop sing-box & xray, switch PF anchor to captive profile (keeping GID 888/889/890 blocked), restore DNS."""
+    for svc in ("system/com.vpnguard.singbox", "system/com.vpnguard.xray"):
+        try:
+            subprocess.run(["launchctl", "bootout", svc], capture_output=True, timeout=15)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+    time.sleep(0.3)
+    for proc_name in ("vpnguard-singbox", "vpnguard-xray"):
+        try:
+            subprocess.run(["pkill", "-9", "-x", proc_name], capture_output=True, timeout=5)
+        except Exception:
+            pass
+
+    res_pf = subprocess.run(
+        ["/usr/local/libexec/vpnguard-pf-boot.sh", "captive"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if res_pf.returncode != 0:
+        err = res_pf.stderr.strip() or res_pf.stdout.strip() or "captive PF load failed"
+        raise RuntimeError(f"Fail-closed: could not enter Captive Portal PF mode ({err})")
+
+    dns_ok, dns_msg = restore_system_dns()
+    if not quiet and not dns_ok:
+        print(f"    {C_YELLOW}[!] {dns_msg}{C_RESET}", file=sys.stderr)
 
 
 def _disable_protection_core(quiet: bool = False) -> None:
@@ -1749,6 +1912,8 @@ def _cmd_on_locked(args: argparse.Namespace) -> int:
     _set_launchd_service_enabled("system/com.vpnguard.pf", True)
     res_pf = subprocess.run(["/usr/local/libexec/vpnguard-pf-boot.sh", "on", "--no-dns-sync"], capture_output=True, text=True, timeout=15)
     if res_pf.returncode == 0:
+        # Flush stale direct PF states on physical interfaces BEFORE starting xray/sing-box
+        _kill_non_tunnel_pf_states()
         print(f"    {C_GREEN}✓ PF Kill-Switch armed successfully (Fail-Closed active){C_RESET}")
     else:
         err_pf = res_pf.stderr.strip() or res_pf.stdout.strip() or "vpnguard-pf-boot.sh failed"
@@ -1854,11 +2019,13 @@ def cmd_pause(args: argparse.Namespace) -> int:
 
     try:
         with acquire_state_lock():
+            _enter_captive_portal_mode(quiet=True)
+
             pause_until = int(time.time()) + seconds
+            pause_token = secrets.token_hex(16)
             os.makedirs(RUN_DIR, exist_ok=True)
             atomic_write_text(PAUSE_UNTIL_FILE, f"{pause_until}\n", mode=0o644)
-
-            _disable_protection_core(quiet=True)
+            atomic_write_text(PAUSE_TOKEN_FILE, f"{pause_token}\n", mode=0o644)
 
             watcher_pid = _is_pause_watcher_alive()
             if watcher_pid is None:
@@ -1871,7 +2038,7 @@ def cmd_pause(args: argparse.Namespace) -> int:
                 )
                 watcher_pid = proc.pid
                 atomic_write_text(PAUSE_WATCHER_PID_FILE, f"{watcher_pid}\n", mode=0o644)
-    except TimeoutError as e:
+    except (TimeoutError, RuntimeError) as e:
         print(json.dumps({"status": "error", "message": str(e)}), file=sys.stderr)
         return 1
 
@@ -1885,30 +2052,66 @@ def cmd_pause(args: argparse.Namespace) -> int:
 
 
 def cmd_pause_watcher(args: argparse.Namespace) -> int:
-    """Internal wall-clock background watcher that re-arms VPNGuard when pause_until expires."""
+    """Internal wall-clock & captive-portal watcher that re-arms VPNGuard on Success, sleep/wake, or TTL expiry."""
     if os.geteuid() != 0:
         return 1
 
+    prev_wall = time.time()
+    prev_mono = time.monotonic()
+    consecutive_success = 0
+
     try:
         while True:
+            now_wall = time.time()
+            now_mono = time.monotonic()
+            sleep_detected = ((now_wall - prev_wall) - (now_mono - prev_mono)) > 10.0
+            prev_wall = now_wall
+            prev_mono = now_mono
+
             target_ts = _read_pause_until()
-            if target_ts is None:
+            token = _read_pause_token()
+            if target_ts is None or not token:
                 return 0
 
-            if time.time() >= target_ts:
+            should_rearm = False
+            rearm_reason = "timer"
+
+            if sleep_detected:
+                should_rearm = True
+                rearm_reason = "sleep"
+            elif now_wall >= target_ts:
+                should_rearm = True
+                rearm_reason = "timer"
+            elif _check_captive_portal_success(timeout=2.5):
+                consecutive_success += 1
+                if consecutive_success >= 2:
+                    should_rearm = True
+                    rearm_reason = "captive_success"
+            else:
+                consecutive_success = 0
+
+            if should_rearm:
                 with acquire_state_lock():
-                    # Re-check under state lock so we never double-arm if resume-if-expired/on already ran
                     latest_ts = _read_pause_until()
-                    if latest_ts is None or time.time() < latest_ts:
-                        if latest_ts is None:
-                            return 0
+                    latest_token = _read_pause_token()
+                    if latest_ts is None or not latest_token:
+                        return 0
+                    if latest_token != token:
+                        # Pause was extended or replaced; reset streak and continue under new token
+                        consecutive_success = 0
+                        time.sleep(2)
                         continue
                     rc = cmd_on(argparse.Namespace(json=True, fast=True))
                 if rc == 0:
-                    notify("🛡️ VPNGuard", "Пауза Wi-Fi завершена. Защита и Kill-Switch снова активны.")
+                    if rearm_reason == "captive_success":
+                        notify("🛡️ VPNGuard", "Авторизация Wi-Fi подтверждена. Защита и Kill-Switch восстановлены.")
+                    elif rearm_reason == "sleep":
+                        notify("🛡️ VPNGuard", "Обнаружен выход из сна. Защита и Kill-Switch восстановлены.")
+                    else:
+                        notify("🛡️ VPNGuard", "Время паузы Wi-Fi истекло. Защита и Kill-Switch снова активны.")
                 return rc
 
-            time.sleep(5)
+            time.sleep(2 if consecutive_success > 0 else 3)
     finally:
         if os.path.exists(PAUSE_WATCHER_PID_FILE):
             try:
@@ -2153,6 +2356,159 @@ def cmd_dns_sync(args: argparse.Namespace) -> int:
         return 0
     print(json.dumps({"status": "error", "message": msg}, ensure_ascii=False), file=sys.stderr)
     return 1
+
+
+def _normalize_explain_domain(raw: str) -> str:
+    """Extract normalized domain/host from a domain string or full URL (lowercase, no port/path/trailing dot)."""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if "://" in text or "/" in text or (":" in text and not text.startswith("[")):
+        parsed = urllib.parse.urlsplit(text if "://" in text else f"https://{text}")
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+        return host
+    return text.lower().rstrip(".")
+
+
+def explain_routing_target(target: str, rules: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Evaluate Static Policy (PF/GID + rules.json compiled via compile_domain_rules)
+    for a domain, URL, .app path, or process name without duplicating sing-box sorting logic.
+    """
+    raw_target = (target or "").strip()
+    active_rules = rules if rules is not None else DEFAULT_RULES
+    apps = active_rules.get("apps", [])
+
+    pf_layers = {
+        "normalSession": "utun99 -> sing-box (GID 890); direct LAN/plain DNS (port 53) blocked by PF",
+        "sandboxSession": "GID 888 (vpnguard run/browser) -> strictly loopback 127.0.0.1:18088/18089 (Xray GID 889); bypasses sing-box rules",
+    }
+    static_note = (
+        "Static Policy evaluation (PF + rules.json). Live runtime may differ due to "
+        "sing-box protocol sniffing, private/GeoIP CIDR rules, or per-process rules."
+    )
+
+    # 1. Check if target looks like an app/process or matches an app rule by name/path
+    lower_raw = raw_target.lower()
+    matched_app_rules: List[Dict[str, Any]] = []
+    for app in apps:
+        if not app.get("enabled", True):
+            continue
+        bp = str(app.get("bundlePath", "")).strip().rstrip("/")
+        name = str(app.get("name", "")).strip()
+        if not bp:
+            continue
+        bp_base = os.path.basename(bp).lower()
+        if (
+            raw_target == bp
+            or lower_raw == name.lower()
+            or lower_raw == bp_base
+            or (bp.endswith(".app") and raw_target.startswith(bp + "/"))
+        ):
+            action = app.get("action", "proxy")
+            outbound = "xray-upstream" if action == "proxy" else ("direct" if action == "direct" else "block")
+            matched_app_rules.append({
+                "name": name,
+                "bundlePath": bp,
+                "action": action,
+                "outbound": outbound,
+                "matchType": "process_path_regex" if bp.endswith(".app") else "process_path",
+            })
+
+    looks_like_app = (
+        raw_target.startswith("/")
+        or lower_raw.endswith(".app")
+        or (bool(matched_app_rules) and "." not in raw_target)
+    )
+
+    if looks_like_app or matched_app_rules:
+        winner = matched_app_rules[0] if matched_app_rules else None
+        shadowed = matched_app_rules[1:] if len(matched_app_rules) > 1 else []
+        outbound = winner["outbound"] if winner else "xray-upstream"
+        action = winner["action"] if winner else "proxy"
+        return {
+            "target": raw_target,
+            "normalizedTarget": raw_target,
+            "targetType": "app",
+            "policyMode": "static",
+            "note": static_note,
+            "pfLayers": pf_layers,
+            "winningRule": winner,
+            "shadowedRules": shadowed,
+            "fallback": winner is None,
+            "resolvedAction": action,
+            "resolvedOutbound": outbound,
+            "resolvedDns": "depends on destination domain (default: dns-remote)",
+        }
+
+    # 2. Domain / URL evaluation using exact same compile_domain_rules() as build_singbox_config()
+    norm_host = _normalize_explain_domain(raw_target)
+    compiled_domains = compile_domain_rules(active_rules)
+
+    matching: List[Dict[str, Any]] = []
+    if norm_host:
+        for dom, action, is_user in compiled_domains:
+            if norm_host == dom or norm_host.endswith("." + dom):
+                outbound = "xray-upstream" if action == "proxy" else ("direct" if action == "direct" else "block")
+                dns_server = "reject" if action == "block" else ("dns-direct" if action == "direct" else "dns-remote")
+                matching.append({
+                    "domain": dom,
+                    "action": action,
+                    "source": "user" if is_user else "preset",
+                    "outbound": outbound,
+                    "dns": dns_server,
+                })
+
+    winner = matching[0] if matching else None
+    shadowed = matching[1:] if len(matching) > 1 else []
+
+    return {
+        "target": raw_target,
+        "normalizedTarget": norm_host,
+        "targetType": "domain",
+        "policyMode": "static",
+        "note": static_note,
+        "pfLayers": pf_layers,
+        "winningRule": winner,
+        "shadowedRules": shadowed,
+        "fallback": winner is None,
+        "resolvedAction": winner["action"] if winner else "proxy",
+        "resolvedOutbound": winner["outbound"] if winner else "xray-upstream",
+        "resolvedDns": winner["dns"] if winner else "dns-remote",
+    }
+
+
+def cmd_explain(args: argparse.Namespace) -> int:
+    """Explain Static Policy routing decision for a domain, URL, or app."""
+    target = getattr(args, "target", "")
+    rules_data = DEFAULT_RULES
+    if os.path.exists(RULES_FILE_PATH):
+        try:
+            with open(RULES_FILE_PATH, "r", encoding="utf-8") as f:
+                rules_data = json.load(f)
+        except Exception:
+            pass
+
+    result = explain_routing_target(target, rules=rules_data)
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+
+    print(f"\n{C_BOLD}{C_CYAN}=== 🧭 VPNGuard Explain Routing (Static Policy) ==={C_RESET}")
+    print(f"Target:      {result['target']} ({result['targetType']} -> {result['normalizedTarget']})")
+    print(f"Policy Mode: {C_YELLOW}{result['policyMode']}{C_RESET} — {result['note']}")
+    print(f"PF Normal:   {result['pfLayers']['normalSession']}")
+    print(f"PF Sandbox:  {result['pfLayers']['sandboxSession']}")
+    if result["winningRule"]:
+        print(f"Winner Rule: {C_GREEN}{json.dumps(result['winningRule'], ensure_ascii=False)}{C_RESET}")
+    else:
+        print(f"Winner Rule: {C_DIM}None (fallback -> final: {result['resolvedOutbound']}){C_RESET}")
+    if result["shadowedRules"]:
+        print(f"Shadowed:    {len(result['shadowedRules'])} less-specific rule(s):")
+        for sr in result["shadowedRules"]:
+            print(f"             - {json.dumps(sr, ensure_ascii=False)}")
+    print(f"Decision:    action={C_BOLD}{result['resolvedAction']}{C_RESET}, outbound={result['resolvedOutbound']}, dns={result['resolvedDns']}\n")
+    return 0
 
 
 def cmd_rules_get(args: argparse.Namespace) -> int:
@@ -3710,12 +4066,13 @@ def cmd_server_update(args: argparse.Namespace) -> int:
 
 
 def cmd_test(args: argparse.Namespace) -> int:
-    """Run comprehensive active leak penetration test suite (12 checks)."""
+    """Run comprehensive active leak penetration test suite (14 checks)."""
     is_json = getattr(args, "json", False)
     if not is_json:
-        print(f"\n{C_BOLD}{C_CYAN}=== 🧪 VPNGuard 3.0 Rigorous Penetration Leak Audit (12 Checks) ==={C_RESET}\n")
+        print(f"\n{C_BOLD}{C_CYAN}=== 🧪 VPNGuard 3.0 Rigorous Penetration Leak Audit (14 Checks) ==={C_RESET}\n")
 
-    results: List[Tuple[str, bool, str]] = []
+    # Each entry: (name, status in {"pass", "degraded", "fail", "unknown"}, details)
+    results: List[Tuple[str, str, str]] = []
     helper_path = EXEC_HELPER_PATH if os.path.exists(EXEC_HELPER_PATH) else LOCAL_EXEC_HELPER
     target_user = os.environ.get("SUDO_USER")
     if os.geteuid() == 0 and (not target_user or target_user == "root"):
@@ -3737,7 +4094,7 @@ def cmd_test(args: argparse.Namespace) -> int:
     pf_ok = pf_info["enabled"] and pf_info["main_anchor_linked"] and pf_info["anchor_loaded"] and pf_info["has_group_888"] and pf_info["has_group_889"]
     results.append((
         "1. PF 3-Point Kernel Verification (Enabled + Linked + Armed)",
-        pf_ok,
+        "pass" if pf_ok else "fail",
         f"PF: {'Enabled' if pf_info['enabled'] else 'OFF'}, /etc/pf.conf: {'Linked' if pf_info['main_anchor_linked'] else 'Unlinked'}, Rules: {pf_info['rules_count']} (Dual-GID)"
     ))
 
@@ -3746,7 +4103,7 @@ def cmd_test(args: argparse.Namespace) -> int:
     proc_ok = xray_proc["running"] and (not xray_proc["is_root"]) and (xray_proc["group"] in ["vpnguard-proxy", "889"])
     results.append((
         "2. Dedicated Xray Proxy Daemon Isolation (Non-root, GID 889)",
-        proc_ok,
+        "pass" if proc_ok else ("degraded" if pf_ok else "fail"),
         f"PID: {xray_proc['pid']}, User: {xray_proc['user']}, Group: {xray_proc['group']}" if xray_proc["running"] else "Xray daemon not running"
     ))
 
@@ -3768,11 +4125,11 @@ def cmd_test(args: argparse.Namespace) -> int:
         happ_blocked = (res_happ.returncode != 0)
         results.append((
             "3. Happ Decoupling Prevention (lo0:10808/10809 blocked)",
-            happ_blocked,
+            "pass" if happ_blocked else "fail",
             "BLOCKED (PF explicitly rejects loopback connections to Happ)" if happ_blocked else "FAILED! Happ loopback port accessible!"
         ))
     else:
-        results.append(("3. Happ Decoupling Prevention", False, "SKIPPED (Helper or PF unavailable)"))
+        results.append(("3. Happ Decoupling Prevention", "unknown", "SKIPPED (Helper or PF unavailable)"))
 
     # Test 4: Dedicated Xray Proxy Ports Reachability (18088 / 18089)
     socks_up = check_port_listening(host, socks_port)
@@ -3780,31 +4137,34 @@ def cmd_test(args: argparse.Namespace) -> int:
     ports_ok = socks_up and http_up
     results.append((
         "4. Dedicated Proxy Ports Reachability (SOCKS 18088 & HTTP 18089)",
-        ports_ok,
+        "pass" if ports_ok else ("degraded" if pf_ok else "fail"),
         f"SOCKS (18088): {'UP' if socks_up else 'DOWN'}, HTTP (18089): {'UP' if http_up else 'DOWN'}"
     ))
 
     # Test 5: Remote Host Resolution via Proxy (Zero local mDNS query)
-    try:
-        test_domain = "api.anthropic.com"
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(3.0)
-        s.connect((host, socks_port))
-        s.sendall(b"\x05\x01\x00")
-        s.recv(2)
-        b_dom = test_domain.encode()
-        req = b"\x05\x01\x00\x03" + bytes([len(b_dom)]) + b_dom + (443).to_bytes(2, "big")
-        s.sendall(req)
-        resp = s.recv(10)
-        s.close()
-        dns_ok = (len(resp) >= 2 and resp[1] == 0)
-        results.append((
-            "5. Remote Host-Resolution (socks5h / Zero local mDNS)",
-            dns_ok,
-            f"Resolved & connected to {test_domain}:443 remotely via proxy" if dns_ok else "Resolution/connection standby (upstream tunnel required)"
-        ))
-    except Exception as e:
-        results.append(("5. Remote Host-Resolution (socks5h / Zero local mDNS)", False, f"Standby: {e}"))
+    if ports_ok:
+        try:
+            test_domain = "api.anthropic.com"
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(3.0)
+            s.connect((host, socks_port))
+            s.sendall(b"\x05\x01\x00")
+            s.recv(2)
+            b_dom = test_domain.encode()
+            req = b"\x05\x01\x00\x03" + bytes([len(b_dom)]) + b_dom + (443).to_bytes(2, "big")
+            s.sendall(req)
+            resp = s.recv(10)
+            s.close()
+            dns_ok = (len(resp) >= 2 and resp[1] == 0)
+            results.append((
+                "5. Remote Host-Resolution (socks5h / Zero local mDNS)",
+                "pass" if dns_ok else "degraded",
+                f"Resolved & connected to {test_domain}:443 remotely via proxy" if dns_ok else "Resolution/connection standby (upstream tunnel required)"
+            ))
+        except Exception as e:
+            results.append(("5. Remote Host-Resolution (socks5h / Zero local mDNS)", "degraded", f"Standby: {e}"))
+    else:
+        results.append(("5. Remote Host-Resolution (socks5h / Zero local mDNS)", "unknown", "SKIPPED (SOCKS5 proxy port 18088 unavailable)"))
 
     # Test 6: Direct IPv4 Bypass Prevention (TCP 1.1.1.1:80 outside lo0)
     if os.path.exists(helper_path) and pf_info["anchor_loaded"]:
@@ -3822,11 +4182,11 @@ def cmd_test(args: argparse.Namespace) -> int:
         blocked_v4 = (res_v4.returncode != 0)
         results.append((
             "6. Direct IPv4 TCP Bypass Prevention (1.1.1.1:80 direct)",
-            blocked_v4,
+            "pass" if blocked_v4 else "fail",
             "BLOCKED (Instant TCP RST / drop by XNU PF killswitch)" if blocked_v4 else "FAILED! Direct packet escaped!"
         ))
     else:
-        results.append(("6. Direct IPv4 TCP Bypass Prevention", False, "SKIPPED"))
+        results.append(("6. Direct IPv4 TCP Bypass Prevention", "unknown", "SKIPPED (Helper or PF unavailable)"))
 
     # Test 7: Direct IPv6 Bypass Prevention ([2606:4700:4700::1111]:80)
     if os.path.exists(helper_path) and pf_info["anchor_loaded"]:
@@ -3844,11 +4204,11 @@ def cmd_test(args: argparse.Namespace) -> int:
         blocked_v6 = (res_v6.returncode != 0)
         results.append((
             "7. Direct IPv6 TCP Bypass Prevention ([2606:..]:80 direct)",
-            blocked_v6,
+            "pass" if blocked_v6 else "fail",
             "BLOCKED (Instant drop by XNU PF killswitch)" if blocked_v6 else "FAILED! Direct packet escaped!"
         ))
     else:
-        results.append(("7. Direct IPv6 TCP Bypass Prevention", False, "SKIPPED"))
+        results.append(("7. Direct IPv6 TCP Bypass Prevention", "unknown", "SKIPPED (Helper or PF unavailable)"))
 
     # Test 8: Direct UDP DNS Leak Test (UDP 1.1.1.1:53 outside lo0)
     if os.path.exists(helper_path) and pf_info["anchor_loaded"]:
@@ -3867,11 +4227,11 @@ def cmd_test(args: argparse.Namespace) -> int:
         blocked_udp = (res_udp.returncode != 0)
         results.append((
             "8. Direct UDP DNS Leak Prevention (1.1.1.1:53 unproxied)",
-            blocked_udp,
+            "pass" if blocked_udp else "fail",
             "BLOCKED (UDP packet rejected by XNU PF killswitch)" if blocked_udp else "FAILED! UDP packet escaped!"
         ))
     else:
-        results.append(("8. Direct UDP DNS Leak Prevention", False, "SKIPPED"))
+        results.append(("8. Direct UDP DNS Leak Prevention", "unknown", "SKIPPED (Helper or PF unavailable)"))
 
     # Test 9: Anti-LPE Security Check (Root execution prohibited)
     if os.path.exists(helper_path):
@@ -3882,11 +4242,11 @@ def cmd_test(args: argparse.Namespace) -> int:
         ))
         results.append((
             "9. Anti-LPE Security Check (Root execution prohibited)",
-            root_rejected,
+            "pass" if root_rejected else "fail",
             "ENFORCED (Root execution rejected & sudoers hardened)" if root_rejected else "FAILED! Root execution permitted!"
         ))
     else:
-        results.append(("9. Anti-LPE Security Check", False, "SKIPPED"))
+        results.append(("9. Anti-LPE Security Check", "unknown", "SKIPPED (Helper unavailable)"))
 
     # Test 10: Environment Variable & Browser Sandbox Integrity
     if os.path.exists(helper_path):
@@ -3924,11 +4284,11 @@ def cmd_test(args: argparse.Namespace) -> int:
                 details = str(e)
         results.append((
             "10. Environment & Browser Sandbox Integrity",
-            env_ok,
+            "pass" if env_ok else "fail",
             details if env_ok else f"Failed checks: {details}"
         ))
     else:
-        results.append(("10. Environment & Browser Sandbox Integrity", False, "SKIPPED"))
+        results.append(("10. Environment & Browser Sandbox Integrity", "unknown", "SKIPPED (Helper unavailable)"))
 
     # Test 11: Dual-Mirror Egress Check (Foreign & Alternate Mirrors via HTTP 18089)
     if os.path.exists(helper_path) and check_port_listening(host, http_port):
@@ -3969,7 +4329,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         )
         res_dual = subprocess.run(helper_runner + [sys.executable, "-c", code_dual], capture_output=True, text=True, timeout=25)
         lines = [l.strip() for l in res_dual.stdout.strip().split("\n") if l.strip().startswith("{")]
-        dual_ok = False
+        dual_status = "degraded"
 
         has_placeholder = False
         try:
@@ -3995,37 +4355,41 @@ def cmd_test(args: argparse.Namespace) -> int:
                     no_leak = (f_ip != phys_ip) and (m_ip != phys_ip)
                     ip_match = (f_ip == m_ip)
                     if no_leak and ip_match:
-                        dual_ok = True
+                        dual_status = "pass"
                         dual_details = f"Verified: {f_ip} (Foreign & 2ip.io match, Provider IP {phys_ip} hidden)"
                     elif no_leak:
-                        dual_ok = True
+                        dual_status = "pass"
                         dual_details = f"Verified non-leaking pool: {f_ip} / {m_ip} (Provider IP {phys_ip} hidden)"
                     else:
+                        dual_status = "fail"
                         dual_details = f"LEAK DETECTED! Returned provider IP: {f_ip}"
                 elif f_ip or m_ip:
                     valid_ip = f_ip or m_ip
                     if valid_ip != phys_ip:
-                        dual_ok = True
+                        dual_status = "pass"
                         dual_details = f"Single mirror verified: {valid_ip} (Non-RU, Provider hidden)"
+                    else:
+                        dual_status = "fail"
+                        dual_details = f"LEAK DETECTED! Returned provider IP: {valid_ip}"
             except Exception as e:
                 dual_details = f"Error evaluating mirrors: {e}"
 
         results.append((
             "11. Dual-Mirror Egress Check (Foreign & 2ip.io via 18089)",
-            dual_ok,
+            dual_status,
             dual_details
         ))
     else:
         results.append((
             "11. Dual-Mirror Egress Check (Foreign & 2ip.io via 18089)",
-            False,
+            "unknown",
             "SKIPPED (Helper or HTTP port 18089 unavailable)"
         ))
 
     # Test 12: Transparent TUN Egress & LAN DNS Leak Check (utun99 without HTTP_PROXY)
     utun_info = get_utun_status()
     if utun_info.get("active") and pf_info["anchor_loaded"]:
-        tun_ok = False
+        tun_status = "degraded"
         tun_details = "TUN egress check failed"
         try:
             res_tun = subprocess.run(
@@ -4057,41 +4421,95 @@ def cmd_test(args: argparse.Namespace) -> int:
                 lan_dns_blocked = (res_lan.returncode != 0)
 
             if tun_ip and tun_ip != phys_ip and lan_dns_blocked:
-                tun_ok = True
+                tun_status = "pass"
                 tun_details = f"Verified via {utun_info['interface']}: {tun_ip} (no HTTP_PROXY, LAN port 53 blocked)"
             elif not lan_dns_blocked:
+                tun_status = "fail"
                 tun_details = "FAILED! Plain DNS packet to RFC1918 LAN port 53 was not blocked"
+            elif tun_ip and tun_ip == phys_ip:
+                tun_status = "fail"
+                tun_details = f"LEAK DETECTED! Transparent TUN returned provider IP: {tun_ip}"
             else:
+                tun_status = "degraded"
                 tun_details = f"Transparent TUN egress did not return valid non-RU IP (got '{tun_ip}')"
         except Exception as e:
             tun_details = f"TUN test error: {e}"
         results.append((
             "12. Transparent TUN Egress & LAN DNS Block (utun99)",
-            tun_ok,
+            tun_status,
             tun_details
         ))
     else:
         results.append((
             "12. Transparent TUN Egress & LAN DNS Block (utun99)",
-            False,
+            "unknown",
             "SKIPPED (utun99 or PF unavailable)"
         ))
 
-    all_passed = all(r[1] for r in results)
-    passed_count = sum(1 for r in results if r[1])
-    failed_count = len(results) - passed_count
+    # Test 13: Headless Network & Power Sync Daemon (com.vpnguard.netwatch)
+    netwatch_proc = get_netwatch_process_status()
+    desired_on = (read_desired_state() == "on")
+    if netwatch_proc["running"]:
+        results.append((
+            "13. Headless Network & Power Watcher (com.vpnguard.netwatch)",
+            "pass",
+            f"Running (PID {netwatch_proc['pid']}; SCDynamicStore + IOKit sleep/wake active)"
+        ))
+    elif desired_on:
+        results.append((
+            "13. Headless Network & Power Watcher (com.vpnguard.netwatch)",
+            "degraded",
+            "Not running while desired_state=on (headless Wi-Fi roaming/wake DNS sync unavailable)"
+        ))
+    else:
+        results.append((
+            "13. Headless Network & Power Watcher (com.vpnguard.netwatch)",
+            "unknown",
+            "Not running (protection desired_state is OFF)"
+        ))
+
+    # Test 14: Live Session GID 888 Isolation (os.getgroups() without sudo)
+    if os.geteuid() == 0:
+        results.append((
+            "14. Live Session GID 888 Isolation (Browser Profile)",
+            "unknown",
+            "UNKNOWN under sudo/root (checked live inside VPNGuard.app user session)"
+        ))
+    else:
+        session_gids = os.getgroups()
+        if 888 not in session_gids:
+            results.append((
+                "14. Live Session GID 888 Isolation (Browser Profile)",
+                "pass",
+                "Enforced (GID 888 absent from current user session)"
+            ))
+        else:
+            results.append((
+                "14. Live Session GID 888 Isolation (Browser Profile)",
+                "fail",
+                "FAILED! Current user session still holds GID 888 — log out or reboot to isolate browser profile"
+            ))
+
+    all_passed = all(r[1] == "pass" for r in results)
+    passed_count = sum(1 for r in results if r[1] == "pass")
+    degraded_count = sum(1 for r in results if r[1] == "degraded")
+    unknown_count = sum(1 for r in results if r[1] == "unknown")
+    failed_count = sum(1 for r in results if r[1] == "fail")
 
     if is_json:
         out = {
             "passed": all_passed,
             "total": len(results),
             "passedCount": passed_count,
+            "degradedCount": degraded_count,
+            "unknownCount": unknown_count,
             "failedCount": failed_count,
             "tests": [
                 {
                     "id": idx + 1,
                     "name": r[0],
-                    "passed": r[1],
+                    "passed": (r[1] == "pass"),
+                    "status": r[1],
                     "details": r[2]
                 }
                 for idx, r in enumerate(results)
@@ -4103,8 +4521,15 @@ def cmd_test(args: argparse.Namespace) -> int:
     # Print results table
     print(f"{'Audit Test Item':<58} | {'Status':<10} | {'Details'}")
     print("-" * 105)
-    for name, passed, details in results:
-        status_str = f"{C_GREEN}PASS{C_RESET}" if passed else f"{C_RED}FAIL{C_RESET}"
+    for name, status_val, details in results:
+        if status_val == "pass":
+            status_str = f"{C_GREEN}PASS{C_RESET}"
+        elif status_val == "degraded":
+            status_str = f"{C_YELLOW}DEGRADED{C_RESET}"
+        elif status_val == "unknown":
+            status_str = f"{C_CYAN}UNKNOWN{C_RESET}"
+        else:
+            status_str = f"{C_RED}FAIL{C_RESET}"
         print(f"{name:<58} | {status_str:<19} | {details}")
     print("-" * 105)
 
@@ -4112,7 +4537,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         print(f"\n{C_BOLD}{C_GREEN}🎉 ALL {len(results)} AUDIT TESTS PASSED! Your connection is fully protected by Dual-GID jail.{C_RESET}\n")
         return 0
     else:
-        print(f"\n{C_BOLD}{C_YELLOW}⚠️  SOME AUDIT TESTS FAILED OR ARE IN STANDBY. Review the results above.{C_RESET}\n")
+        print(f"\n{C_BOLD}{C_YELLOW}⚠️  AUDIT SUMMARY: {passed_count} PASS, {degraded_count} DEGRADED, {unknown_count} UNKNOWN, {failed_count} FAIL.{C_RESET}\n")
         return 1
 
 
@@ -4299,6 +4724,12 @@ def main() -> int:
     p_logs = subparsers.add_parser("logs", help="Output sanitized diagnostic logs and PF/DNS state")
     p_logs.add_argument("--json", action="store_true", help="Output logs in JSON format")
     p_logs.set_defaults(func=cmd_logs)
+
+    # explain
+    p_explain = subparsers.add_parser("explain", help="Explain Static Policy routing decision for a domain, URL, or app")
+    p_explain.add_argument("target", help="Domain, URL, .app path, or process name")
+    p_explain.add_argument("--json", action="store_true", help="Output explanation in JSON format")
+    p_explain.set_defaults(func=cmd_explain)
 
     # rules
     p_rules = subparsers.add_parser("rules", help="Manage dynamic routing rules (rules.json)")

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Darwin
 
 public struct DiagnosticsView: View {
     @ObservedObject var vm: VPNGuardViewModel
@@ -143,7 +144,7 @@ public struct DiagnosticsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Комплексный аудит утечек (vpnguard test)")
                             .font(.system(size: 14, weight: .semibold))
-                        Text("Проверка ядра PF, изоляции GID 888/889/890, mDNS, utun99 и выходного IP")
+                        Text("Проверка ядра PF, изоляции GID 888/889/890, mDNS, utun99, netwatch и выходного IP")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                     }
@@ -188,27 +189,42 @@ public struct DiagnosticsView: View {
                     .disabled(vm.isRunningAudit)
                 }
 
+                if currentSessionHoldsGid888() {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.octagon.fill")
+                            .foregroundStyle(VGTheme.statusDanger)
+                        Text("Текущая пользовательская сессия всё ещё содержит GID 888 (vpnguard). Выйдите из системы или перезагрузите Mac для полной изоляции профиля браузера.")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(VGTheme.statusDanger)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                    }
+                    .padding(10)
+                    .background(VGTheme.statusDanger.opacity(0.10), in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous))
+                }
+
                 if let report = vm.auditReport {
                     Divider().opacity(0.45)
 
                     HStack(spacing: 8) {
-                        Image(systemName: report.passed ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                            .foregroundStyle(report.passed ? VGTheme.statusProtected : VGTheme.statusWarning)
-                        Text(report.passed
-                             ? "Все \(report.total) проверок успешно пройдены: утечек нет"
-                             : "Пройдено \(report.passedCount) из \(report.total) проверок")
+                        let summaryColor: Color = report.passed
+                            ? VGTheme.statusProtected
+                            : (report.failedCount > 0 ? VGTheme.statusDanger : VGTheme.statusWarning)
+                        Image(systemName: report.passed ? "checkmark.circle.fill" : (report.failedCount > 0 ? "xmark.octagon.fill" : "exclamationmark.triangle.fill"))
+                            .foregroundStyle(summaryColor)
+                        Text(auditSummaryText(report))
                             .font(.system(size: 12, weight: .semibold))
                             .monospacedDigit()
-                            .foregroundStyle(report.passed ? VGTheme.statusProtected : VGTheme.statusWarning)
+                            .foregroundStyle(summaryColor)
                         Spacer()
                     }
 
                     LazyVStack(spacing: 6) {
                         ForEach(report.tests) { test in
                             HStack(alignment: .top, spacing: 10) {
-                                Image(systemName: test.passed ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                Image(systemName: auditIconName(for: test.status))
                                     .font(.system(size: 13))
-                                    .foregroundStyle(test.passed ? VGTheme.statusProtected : VGTheme.statusDanger)
+                                    .foregroundStyle(auditColor(for: test.status))
                                     .padding(.top, 1)
 
                                 VStack(alignment: .leading, spacing: 2) {
@@ -221,8 +237,8 @@ public struct DiagnosticsView: View {
                                 Spacer(minLength: 8)
 
                                 VGStatusBadge(
-                                    test.passed ? "PASS" : "FAIL",
-                                    tone: test.passed ? .protected : .danger
+                                    test.status.rawValue.uppercased(),
+                                    tone: auditBadgeTone(for: test.status)
                                 )
                             }
                             .padding(10)
@@ -233,7 +249,7 @@ public struct DiagnosticsView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "info.circle")
                             .foregroundStyle(.secondary)
-                        Text("Нажмите «Проверить утечки», чтобы выполнить 12 активных тестов изоляции.")
+                        Text("Нажмите «Проверить утечки», чтобы выполнить 14 активных тестов изоляции.")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -349,10 +365,55 @@ public struct DiagnosticsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private func currentSessionHoldsGid888() -> Bool {
+        let count = Darwin.getgroups(0, nil)
+        guard count > 0 else { return false }
+        var gids = [gid_t](repeating: 0, count: Int(count))
+        let actual = Darwin.getgroups(count, &gids)
+        guard actual > 0 else { return false }
+        return gids.prefix(Int(actual)).contains(888)
+    }
+
+    private func auditSummaryText(_ report: AuditReport) -> String {
+        if report.passed {
+            return "Все \(report.total) проверок успешно пройдены: утечек нет"
+        }
+        return "PASS: \(report.passedCount) · DEGRADED: \(report.degradedCount) · UNKNOWN: \(report.unknownCount) · FAIL: \(report.failedCount)"
+    }
+
+    private func auditIconName(for status: AuditStatus) -> String {
+        switch status {
+        case .pass: return "checkmark.circle.fill"
+        case .degraded: return "exclamationmark.triangle.fill"
+        case .unknown: return "questionmark.circle.fill"
+        case .fail: return "xmark.circle.fill"
+        }
+    }
+
+    private func auditColor(for status: AuditStatus) -> Color {
+        switch status {
+        case .pass: return VGTheme.statusProtected
+        case .degraded: return VGTheme.statusWarning
+        case .unknown: return .secondary
+        case .fail: return VGTheme.statusDanger
+        }
+    }
+
+    private func auditBadgeTone(for status: AuditStatus) -> VGStatusBadge.Tone {
+        switch status {
+        case .pass: return .protected
+        case .degraded: return .warning
+        case .unknown: return .neutral
+        case .fail: return .danger
+        }
+    }
+
     private func formatAuditPlain(_ report: AuditReport) -> String {
-        var lines: [String] = ["VPNGuard Audit: \(report.passedCount)/\(report.total) PASS"]
+        var lines: [String] = [
+            "VPNGuard Audit: \(report.passedCount)/\(report.total) PASS (DEGRADED: \(report.degradedCount), UNKNOWN: \(report.unknownCount), FAIL: \(report.failedCount))"
+        ]
         for item in report.tests {
-            lines.append("[\(item.passed ? "PASS" : "FAIL")] \(item.name): \(item.details)")
+            lines.append("[\(item.status.rawValue.uppercased())] \(item.name): \(item.details)")
         }
         return lines.joined(separator: "\n")
     }

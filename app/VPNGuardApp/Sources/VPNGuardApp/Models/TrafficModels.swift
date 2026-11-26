@@ -132,6 +132,35 @@ public struct ClashConnection: Codable, Identifiable, Equatable {
         }
         return false
     }
+
+    public var ruleDisplay: String {
+        let trimmedRule = rule?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let trimmedPayload = rulePayload?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmedRule.isEmpty && trimmedPayload.isEmpty {
+            return "final (по умолчанию)"
+        }
+        if trimmedPayload.isEmpty {
+            return trimmedRule
+        }
+        if trimmedRule.isEmpty {
+            return trimmedPayload
+        }
+        return "\(trimmedRule): \(trimmedPayload)"
+    }
+
+    public var dnsDisplay: String {
+        if let mode = metadata.dnsMode?.trimmingCharacters(in: .whitespacesAndNewlines), !mode.isEmpty {
+            return mode
+        }
+        return "—"
+    }
+
+    public var chainsDisplay: String {
+        if let chains, !chains.isEmpty {
+            return chains.joined(separator: " → ")
+        }
+        return outboundTag
+    }
     
     public var formattedUpload: String {
         ByteFormatter.format(upload)

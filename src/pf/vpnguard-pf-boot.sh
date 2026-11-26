@@ -7,6 +7,7 @@ RUN_DIR="/var/run/vpnguard"
 TOKEN_FILE="${RUN_DIR}/pf.token"
 DESIRED_STATE_FILE="/var/db/vpnguard/desired_state"
 ANCHOR_FILE="/etc/pf.anchors/vpnguard"
+CAPTIVE_ANCHOR_FILE="/etc/pf.anchors/vpnguard-captive"
 EGRESS_FILE="/usr/local/etc/vpnguard/pf.egress.conf"
 XRAY_CONF="/usr/local/etc/vpnguard/xray.json"
 LOG_FILE="/var/log/vpnguard.log"
@@ -16,7 +17,7 @@ SKIP_DNS_SYNC=0
 for arg in "$@"; do
     case "${arg}" in
         --no-dns-sync) SKIP_DNS_SYNC=1 ;;
-        on|off|flush|stop) ACTION="${arg}" ;;
+        on|off|flush|stop|captive) ACTION="${arg}" ;;
     esac
 done
 
@@ -43,8 +44,8 @@ if [[ "${ACTION}" == "off" || "${ACTION}" == "flush" || "${ACTION}" == "stop" ]]
     exit 0
 fi
 
-# Respect persistent desired_state=off on system boot / LaunchDaemon load
-if [[ -f "${DESIRED_STATE_FILE}" ]]; then
+# Respect persistent desired_state=off on system boot / LaunchDaemon load (only for normal 'on' boot)
+if [[ "${ACTION}" == "on" && -f "${DESIRED_STATE_FILE}" ]]; then
     DESIRED_STATE=$(tr -d '[:space:]' < "${DESIRED_STATE_FILE}" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
     if [[ "${DESIRED_STATE}" == "off" ]]; then
         log "Desired state is OFF; skipping PF bootstrap."
@@ -53,7 +54,7 @@ if [[ -f "${DESIRED_STATE_FILE}" ]]; then
     fi
 fi
 
-log "Starting VPNGuard PF bootstrap..."
+log "Starting VPNGuard PF bootstrap (action=${ACTION})..."
 
 # 1. Enable PF using reference counting (-E); reuse existing token only if PF is currently Enabled
 PF_ENABLED=0
@@ -108,6 +109,26 @@ if [[ -f "${PF_CONF}" ]]; then
         chmod 644 "${PF_CONF}"
         pfctl -f "${PF_CONF}" 2>/dev/null || true
         log "Reloaded ${PF_CONF}"
+    fi
+fi
+
+if [[ "${ACTION}" == "captive" ]]; then
+    # Flush Xray egress sub-anchor so GID 889 cannot send outbound traffic during Captive Portal
+    pfctl -a "vpnguard/egress" -F all 2>&1 | while read -r line; do log "pfctl egress flush: ${line}"; done || true
+    if [[ ! -f "${CAPTIVE_ANCHOR_FILE}" ]]; then
+        log "Error: ${CAPTIVE_ANCHOR_FILE} not found; failing closed with ${ANCHOR_FILE}."
+        [[ -f "${ANCHOR_FILE}" ]] && pfctl -a vpnguard -f "${ANCHOR_FILE}" >/dev/null 2>&1 || true
+        exit 1
+    fi
+    if CAPTIVE_OUT=$(pfctl -a vpnguard -f "${CAPTIVE_ANCHOR_FILE}" 2>&1); then
+        [[ -n "${CAPTIVE_OUT}" ]] && log "pfctl captive anchor: ${CAPTIVE_OUT}"
+        log "Captive Portal anchor 'vpnguard-captive' loaded (GID 888/889/890 blocked, PF token preserved)."
+        echo "VPNGuard Captive Portal PF rules initialized."
+        exit 0
+    else
+        log "Error: failed to load ${CAPTIVE_ANCHOR_FILE}: ${CAPTIVE_OUT}; failing closed."
+        [[ -f "${ANCHOR_FILE}" ]] && pfctl -a vpnguard -f "${ANCHOR_FILE}" >/dev/null 2>&1 || true
+        exit 1
     fi
 fi
 

@@ -215,6 +215,108 @@ class TestLogsAndRouting(unittest.TestCase):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    def test_cmd_status_json_includes_decoupled_health_flags(self):
+        import argparse, io, contextlib, time
+        buf = io.StringIO()
+        with mock.patch.object(vpnguard, "load_config", return_value={}), \
+             mock.patch.object(vpnguard, "get_pf_status", return_value={"enabled": True, "anchor_loaded": True, "rules_count": 10, "blocked_packets": 3}), \
+             mock.patch.object(vpnguard, "get_xray_process_status", return_value={"running": False, "pid": None, "group": None, "user": None}), \
+             mock.patch.object(vpnguard, "get_singbox_process_status", return_value={"running": False, "pid": None, "gid": None, "user": None}), \
+             mock.patch.object(vpnguard, "get_utun_status", return_value={"active": False, "interface": None}), \
+             mock.patch.object(vpnguard, "get_netwatch_process_status", return_value={"running": True, "pid": 999}), \
+             mock.patch.object(vpnguard, "get_active_relay_ip", return_value="203.0.113.10"), \
+             mock.patch.object(vpnguard, "_read_pause_until", return_value=int(time.time()) + 120), \
+             mock.patch.object(vpnguard, "_read_pause_token", return_value="abc123"):
+            with contextlib.redirect_stdout(buf):
+                rc = vpnguard.cmd_status(argparse.Namespace(json=True, fast=True))
+        self.assertEqual(rc, 1)
+        data = json.loads(buf.getvalue())
+        self.assertFalse(data["isProtectionOn"])
+        self.assertTrue(data["pf_active"])
+        self.assertFalse(data["utun_active"])
+        self.assertFalse(data["cores_alive"])
+        self.assertTrue(data["netwatch_active"])
+        self.assertTrue(data["captive_pause_active"])
+
+    def test_cmd_test_json_emits_four_states_and_session_gid_check(self):
+        import argparse, io, contextlib
+        buf = io.StringIO()
+        with mock.patch.object(vpnguard, "EXEC_HELPER_PATH", "/nonexistent/helper"), \
+             mock.patch.object(vpnguard, "LOCAL_EXEC_HELPER", "/nonexistent/helper"), \
+             mock.patch.object(vpnguard, "load_config", return_value={}), \
+             mock.patch.object(vpnguard, "get_pf_status", return_value={
+                 "enabled": False, "main_anchor_linked": False, "anchor_loaded": False,
+                 "has_group_888": False, "has_group_889": False, "rules_count": 0
+             }), \
+             mock.patch.object(vpnguard, "query_physical_ip", return_value={"ip": "203.0.113.1"}), \
+             mock.patch.object(vpnguard, "get_xray_process_status", return_value={"running": False, "pid": None, "group": None, "user": None, "is_root": False}), \
+             mock.patch.object(vpnguard, "check_port_listening", return_value=False), \
+             mock.patch.object(vpnguard, "get_utun_status", return_value={"active": False, "interface": None}), \
+             mock.patch.object(vpnguard, "get_netwatch_process_status", return_value={"running": False, "pid": None}), \
+             mock.patch.object(vpnguard, "read_desired_state", return_value="on"), \
+             mock.patch("os.geteuid", return_value=501), \
+             mock.patch("os.getgroups", return_value=[20, 12, 888]):
+            with contextlib.redirect_stdout(buf):
+                rc = vpnguard.cmd_test(argparse.Namespace(json=True))
+        self.assertEqual(rc, 1)
+        report = json.loads(buf.getvalue())
+        self.assertEqual(report["total"], 14)
+        self.assertGreater(report["unknownCount"], 0)
+        self.assertGreater(report["degradedCount"], 0)
+        self.assertGreater(report["failedCount"], 0)
+        test13 = report["tests"][12]
+        test14 = report["tests"][13]
+        self.assertEqual(test13["status"], "degraded")
+        self.assertEqual(test14["status"], "fail")
+
+    def test_explain_routing_url_specificity_app_fallback_and_json(self):
+        import argparse, io, contextlib
+        rules = {
+            "apps": [
+                {"id": "a1", "name": "Cursor", "bundlePath": "/Applications/Cursor.app", "action": "proxy", "enabled": True},
+                {"id": "a2", "name": "node", "bundlePath": "/opt/homebrew/bin/node", "action": "direct", "enabled": True},
+            ],
+            "domains": [
+                {"id": "d1", "domain": "example.ru", "action": "direct", "enabled": True},
+                {"id": "d2", "domain": "api.example.ru", "action": "proxy", "enabled": True},
+            ],
+            "presets": {"aiServicesProxy": True, "ruDirect": True, "blockQuic": True},
+        }
+        # 1. URL normalization + specificity shadowing
+        res_dom = vpnguard.explain_routing_target("https://API.Example.RU:8443/v1/chat.", rules=rules)
+        self.assertEqual(res_dom["targetType"], "domain")
+        self.assertEqual(res_dom["normalizedTarget"], "api.example.ru")
+        self.assertEqual(res_dom["policyMode"], "static")
+        self.assertEqual(res_dom["resolvedAction"], "proxy")
+        self.assertEqual(res_dom["resolvedOutbound"], "xray-upstream")
+        self.assertEqual(res_dom["winningRule"]["domain"], "api.example.ru")
+        self.assertTrue(any(r["domain"] == "example.ru" for r in res_dom["shadowedRules"]))
+
+        # 2. App rule (.app and CLI binary)
+        res_app = vpnguard.explain_routing_target("/Applications/Cursor.app", rules=rules)
+        self.assertEqual(res_app["targetType"], "app")
+        self.assertEqual(res_app["resolvedOutbound"], "xray-upstream")
+        res_cli = vpnguard.explain_routing_target("node", rules=rules)
+        self.assertEqual(res_cli["targetType"], "app")
+        self.assertEqual(res_cli["resolvedOutbound"], "direct")
+
+        # 3. Fallback (no match -> final xray-upstream)
+        res_fb = vpnguard.explain_routing_target("unlisted-service.org", rules=rules)
+        self.assertTrue(res_fb["fallback"])
+        self.assertIsNone(res_fb["winningRule"])
+        self.assertEqual(res_fb["resolvedOutbound"], "xray-upstream")
+
+        # 4. cmd_explain --json
+        buf = io.StringIO()
+        with mock.patch("os.path.exists", return_value=False):
+            with contextlib.redirect_stdout(buf):
+                rc = vpnguard.cmd_explain(argparse.Namespace(target="https://claude.ai/chat", json=True))
+        self.assertEqual(rc, 0)
+        cli_json = json.loads(buf.getvalue())
+        self.assertEqual(cli_json["policyMode"], "static")
+        self.assertIn("normalSession", cli_json["pfLayers"])
+        self.assertIn("sandboxSession", cli_json["pfLayers"])
+
 
 if __name__ == "__main__":
     unittest.main()
