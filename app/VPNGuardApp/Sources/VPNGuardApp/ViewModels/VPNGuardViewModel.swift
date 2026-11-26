@@ -12,6 +12,8 @@ public final class VPNGuardViewModel: ObservableObject {
     @Published public var statusError: String? = nil
 
     public var isProtectionActive: Bool { protectionState.isProtectionActive }
+    public var isKillSwitchArmed: Bool { protectionState.isKillSwitchArmed }
+    public var isTunnelRecovering: Bool { protectionState.isTunnelRecovering }
     public var isTogglingPower: Bool { protectionState.isTogglingPower }
     public var isResolvingExitIP: Bool { protectionState.isResolvingExitIP }
     @Published public var isApplyingRules: Bool = false
@@ -31,6 +33,7 @@ public final class VPNGuardViewModel: ObservableObject {
     @Published public var diagnosticsSnapshot: DiagnosticsLogsSnapshot? = nil
     @Published public var isLoadingDiagnostics: Bool = false
     @Published public var requestedNavigationSection: NavigationSection? = nil
+    @Published public var requestedOpenUpdateSheet: Bool = false
 
     // UI Messages
     @Published public var toastMessage: String? = nil
@@ -160,7 +163,9 @@ public final class VPNGuardViewModel: ObservableObject {
                 guard let self else { return }
                 let utunUp = self.service.isUtunInterfaceUp(name: "utun99")
                 if !utunUp && self.isProtectionActive && !self.isTogglingPower && !self.isTogglingPause {
-                    self.protectionState = .off
+                    self.stateEpoch &+= 1
+                    self.exitIpTask?.cancel()
+                    self.protectionState = .tunnelRecovering
                     self.tunnelHealthOk = nil
                     self.tunnelLatencyMs = nil
                     self.scheduleStatusRefresh(fast: true)
@@ -285,6 +290,8 @@ public final class VPNGuardViewModel: ObservableObject {
                 } else {
                     self.protectionState = .on(exitIP: .failed)
                 }
+            } else if newStatus.pfEnabled && newStatus.pfRulesCount > 0 {
+                self.protectionState = .tunnelRecovering
             } else {
                 self.protectionState = .off
             }
@@ -312,7 +319,7 @@ public final class VPNGuardViewModel: ObservableObject {
     // MARK: - Power Toggle (Two-Phase Activation + stateEpoch)
     public func toggleProtection() async {
         guard !isTogglingPower else { return }
-        let targetState = !isProtectionActive
+        let targetState = !isKillSwitchArmed
         stateEpoch &+= 1
         let opEpoch = stateEpoch
         statusTask?.cancel()
@@ -365,16 +372,23 @@ public final class VPNGuardViewModel: ObservableObject {
         isTogglingPause = true
         defer { isTogglingPause = false }
 
+        stateEpoch &+= 1
+        let opEpoch = stateEpoch
+        statusTask?.cancel()
+        exitIpTask?.cancel()
+
         do {
             showToast("Пауза защиты для входа в Wi-Fi...", isError: false)
             let endDate = try await service.pauseProtection(seconds: seconds)
+            guard opEpoch == stateEpoch else { return }
             setPauseEndDate(endDate)
-            await refreshStatus(fast: true)
+            await refreshStatus(fast: true, expectedEpoch: opEpoch)
             let mins = seconds / 60
             showToast("Пауза на \(mins) мин активна. Защита включится автоматически.", isError: false)
         } catch {
+            guard opEpoch == stateEpoch else { return }
             showToast("Ошибка паузы: \(error.localizedDescription)", isError: true)
-            await refreshStatus(fast: true)
+            await refreshStatus(fast: true, expectedEpoch: opEpoch)
         }
     }
 
@@ -383,15 +397,22 @@ public final class VPNGuardViewModel: ObservableObject {
         isTogglingPause = true
         defer { isTogglingPause = false }
 
+        stateEpoch &+= 1
+        let opEpoch = stateEpoch
+        statusTask?.cancel()
+        exitIpTask?.cancel()
+
         do {
             showToast("Возобновление защиты VPNGuard...", isError: false)
             try await service.turnOn()
+            guard opEpoch == stateEpoch else { return }
             setPauseEndDate(nil)
-            await refreshStatus(fast: false)
+            await refreshStatus(fast: false, expectedEpoch: opEpoch)
             showToast("Защита VPNGuard восстановлена", isError: false)
         } catch {
+            guard opEpoch == stateEpoch else { return }
             showToast("Ошибка возобновления: \(error.localizedDescription)", isError: true)
-            await refreshStatus(fast: true)
+            await refreshStatus(fast: true, expectedEpoch: opEpoch)
         }
     }
 
@@ -499,8 +520,17 @@ public final class VPNGuardViewModel: ObservableObject {
         updateCheckResult = nil
     }
 
+    public var hasLocalUpdateScript: Bool {
+        let scriptPath = (sourceRepoPath as NSString).appendingPathComponent("update.sh")
+        return FileManager.default.fileExists(atPath: scriptPath)
+    }
+
     public func checkForUpdates() async {
         guard !isCheckingUpdates && !isUpdatingApp else { return }
+        guard hasLocalUpdateScript else {
+            updateCheckResult = nil
+            return
+        }
         isCheckingUpdates = true
         defer { isCheckingUpdates = false }
 
@@ -603,9 +633,12 @@ public final class VPNGuardViewModel: ObservableObject {
     // MARK: - Domain Rules
     public func addDomain(input: String, action: RuleAction = .proxy) {
         let cleaned = sanitizeDomain(input)
-        guard !cleaned.isEmpty else { return }
+        guard Self.isValidDomainHost(cleaned) else {
+            showToast("Некорректный домен для правила: \(input)", isError: true)
+            return
+        }
 
-        if rules.domains.contains(where: { $0.domain == cleaned }) {
+        if rules.domains.contains(where: { $0.domain.caseInsensitiveCompare(cleaned) == .orderedSame }) {
             showToast("Домен \(cleaned) уже присутствует в списке", isError: true)
             return
         }
@@ -658,14 +691,35 @@ public final class VPNGuardViewModel: ObservableObject {
 
     nonisolated public static func isValidDomainHost(_ host: String) -> Bool {
         let cleaned = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty, cleaned != "—", cleaned.contains(".") else { return false }
+        guard !cleaned.isEmpty,
+              cleaned != "—",
+              cleaned.contains("."),
+              !cleaned.hasPrefix("."),
+              !cleaned.hasSuffix("."),
+              !cleaned.contains(".."),
+              !cleaned.contains("*"),
+              !cleaned.contains("/"),
+              !cleaned.contains(":"),
+              cleaned.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
+            return false
+        }
         // Reject raw IPv4 / IPv6 literals
         var sin = in_addr()
         var sin6 = in6_addr()
         if inet_pton(AF_INET, cleaned, &sin) == 1 || inet_pton(AF_INET6, cleaned, &sin6) == 1 {
             return false
         }
-        return !cleaned.contains(":")
+        let labels = cleaned.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count >= 2 else { return false }
+        for label in labels {
+            guard !label.isEmpty,
+                  !label.hasPrefix("-"),
+                  !label.hasSuffix("-"),
+                  label.count <= 63 else {
+                return false
+            }
+        }
+        return true
     }
 
     nonisolated public static func rootDomain(from host: String) -> String? {
@@ -771,17 +825,24 @@ public final class VPNGuardViewModel: ObservableObject {
         activatingServerId = id
         defer { activatingServerId = nil }
 
+        stateEpoch &+= 1
+        let opEpoch = stateEpoch
+        statusTask?.cancel()
+        exitIpTask?.cancel()
+
         do {
             try await service.activateServer(id: id)
+            guard opEpoch == stateEpoch else { return false }
             showToast("Сервер переключен успешно", isError: false)
             await loadServers()
-            await refreshStatus(fast: false)
+            await refreshStatus(fast: false, expectedEpoch: opEpoch)
             await loadRules()
             return true
         } catch {
+            guard opEpoch == stateEpoch else { return false }
             showToast("Ошибка активации: \(error.localizedDescription)", isError: true)
             await loadServers()
-            await refreshStatus(fast: true)
+            await refreshStatus(fast: true, expectedEpoch: opEpoch)
             return false
         }
     }
@@ -931,6 +992,11 @@ public final class VPNGuardViewModel: ObservableObject {
             let msg = "Доступных резервных серверов не найдено. Kill-Switch остаётся активным; автопереключение на паузе 5 мин."
             showToast(msg, isError: true)
             service.sendUserNotification(title: "VPNGuard Auto-Failover", message: msg)
+            return
+        }
+
+        // User could have turned off/paused VPN while servers were being pinged
+        guard isProtectionActive, isNetworkSatisfied, !isTogglingPower, !isTogglingPause else {
             return
         }
 

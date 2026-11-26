@@ -472,11 +472,21 @@ public final class GitHubReleaseUpdater: ObservableObject {
         fi
         open "\(targetApp)"
         """
+        let logDir = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Logs/VPNGuard")
+        try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+        let logPath = (logDir as NSString).appendingPathComponent("github-update-relaunch.log")
+        let logHandle = FileHandle(forWritingAtPath: logPath) ?? {
+            FileManager.default.createFile(atPath: logPath, contents: nil)
+            return FileHandle(forWritingAtPath: logPath)
+        }()
+        try? logHandle?.truncate(atOffset: 0)
+
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-        proc.arguments = ["-c", script]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/nohup")
+        proc.arguments = ["/bin/bash", "-c", script]
+        proc.standardInput = FileHandle.nullDevice
+        proc.standardOutput = logHandle ?? FileHandle.nullDevice
+        proc.standardError = logHandle ?? FileHandle.nullDevice
         try? proc.run()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {

@@ -170,7 +170,10 @@ public final class VPNGuardService {
         guard findSupportedChromiumBrowser() != nil else {
             throw VPNGuardError.commandFailed("Не найден Chromium-браузер (Chrome, Brave, Edge, Arc, Vivaldi или Chromium). Fallback на Safari запрещён для защиты от утечек.")
         }
-        try await launchDetachedProcess(executablePath: browserPath, arguments: [], logPath: "/tmp/vpnguard-browser-launch.log")
+        let logDir = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Logs/VPNGuard")
+        try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+        let logPath = (logDir as NSString).appendingPathComponent("browser-launch.log")
+        try await launchDetachedProcess(executablePath: browserPath, arguments: [], logPath: logPath)
     }
 
     private func launchDetachedProcess(executablePath: String, arguments: [String], logPath: String) async throws {

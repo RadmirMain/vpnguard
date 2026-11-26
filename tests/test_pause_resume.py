@@ -107,6 +107,38 @@ class TestPauseResume(unittest.TestCase):
                 self.assertEqual(rc, 0)
                 cmd_on_mock.assert_called_once()
 
+    def test_acquire_state_lock_is_reentrant_and_nonblocking_on_contention(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = os.path.join(tmpdir, "state.lock")
+            with mock.patch.object(vpnguard, "RUN_DIR", tmpdir), \
+                 mock.patch.object(vpnguard, "STATE_LOCK_PATH", lock_path), \
+                 mock.patch.object(vpnguard, "_STATE_LOCK_DEPTH", 0), \
+                 mock.patch.object(vpnguard, "_STATE_LOCK_FD", None):
+                with vpnguard.acquire_state_lock(timeout=1.0):
+                    self.assertEqual(vpnguard._STATE_LOCK_DEPTH, 1)
+                    # Nested re-entrant acquisition must succeed without deadlock
+                    with vpnguard.acquire_state_lock(timeout=0.1):
+                        self.assertEqual(vpnguard._STATE_LOCK_DEPTH, 2)
+                    self.assertEqual(vpnguard._STATE_LOCK_DEPTH, 1)
+                self.assertEqual(vpnguard._STATE_LOCK_DEPTH, 0)
+                self.assertIsNone(vpnguard._STATE_LOCK_FD)
+
+                # External LOCK_EX must trigger TimeoutError cleanly
+                ext_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+                try:
+                    fcntl.flock(ext_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    with self.assertRaises(TimeoutError):
+                        with vpnguard.acquire_state_lock(timeout=0.15):
+                            pass
+                finally:
+                    fcntl.flock(ext_fd, fcntl.LOCK_UN)
+                    os.close(ext_fd)
+
+                # Lock is acquirable again after contention clears
+                with vpnguard.acquire_state_lock(timeout=0.5):
+                    self.assertEqual(vpnguard._STATE_LOCK_DEPTH, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

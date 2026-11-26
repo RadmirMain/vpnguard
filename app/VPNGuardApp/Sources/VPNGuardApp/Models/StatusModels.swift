@@ -11,11 +11,25 @@ public enum ProtectionState: Equatable {
     case off
     case turningOn
     case on(exitIP: ExitIPState)
+    case tunnelRecovering
     case turningOff
 
     public var isProtectionActive: Bool {
         if case .on = self { return true }
         return false
+    }
+
+    public var isKillSwitchArmed: Bool {
+        switch self {
+        case .on, .tunnelRecovering:
+            return true
+        case .off, .turningOn, .turningOff:
+            return false
+        }
+    }
+
+    public var isTunnelRecovering: Bool {
+        self == .tunnelRecovering
     }
 
     public var isTogglingPower: Bool {

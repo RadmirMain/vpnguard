@@ -17,9 +17,8 @@ public struct WebsitesManagementView: View {
         var id: String { rawValue }
     }
 
-    private var filteredDomains: [Binding<DomainRule>] {
-        $vm.rules.domains.filter { binding in
-            let rule = binding.wrappedValue
+    private var filteredDomains: [DomainRule] {
+        vm.rules.domains.filter { rule in
             if !searchDomain.isEmpty && !rule.domain.localizedCaseInsensitiveContains(searchDomain) {
                 return false
             }
@@ -30,6 +29,17 @@ public struct WebsitesManagementView: View {
             case .block: return rule.action == .block
             }
         }
+    }
+
+    private func binding(for rule: DomainRule) -> Binding<DomainRule> {
+        Binding(
+            get: { vm.rules.domains.first(where: { $0.id == rule.id }) ?? rule },
+            set: { updated in
+                if let idx = vm.rules.domains.firstIndex(where: { $0.id == rule.id }) {
+                    vm.rules.domains[idx] = updated
+                }
+            }
+        )
     }
 
     public var body: some View {
@@ -134,9 +144,9 @@ public struct WebsitesManagementView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 8) {
-                        ForEach(filteredDomains) { $rule in
+                        ForEach(filteredDomains) { rule in
                             DomainRuleRow(
-                                rule: $rule,
+                                rule: binding(for: rule),
                                 onChanged: { vm.hasUnappliedChanges = true },
                                 onDelete: { vm.removeDomain(id: rule.id) }
                             )

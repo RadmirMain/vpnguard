@@ -66,8 +66,12 @@ public final class CLIExecutor: @unchecked Sendable {
                         timedOut = true
                     }
                     lock.unlock()
-                    if !alreadyDone && process.isRunning {
-                        process.terminate()
+                    if !alreadyDone {
+                        if process.isRunning {
+                            process.terminate()
+                        }
+                        // Unblock caller immediately; setuid sudo ignores SIGTERM from non-root UI.
+                        finishOnce(-2, "", "Команда превысила таймаут (\(Int(timeout))с)")
                     }
                 }
                 DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: timeoutWork)

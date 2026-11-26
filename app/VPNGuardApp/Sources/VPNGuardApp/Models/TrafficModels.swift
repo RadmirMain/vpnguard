@@ -5,12 +5,27 @@ public struct ClashConnectionSnapshot: Codable {
     public let uploadTotal: Int64
     public let connections: [ClashConnection]
     public let memory: Int64?
-    
+
+    enum CodingKeys: String, CodingKey {
+        case downloadTotal
+        case uploadTotal
+        case connections
+        case memory
+    }
+
     public init(downloadTotal: Int64 = 0, uploadTotal: Int64 = 0, connections: [ClashConnection] = [], memory: Int64? = nil) {
         self.downloadTotal = downloadTotal
         self.uploadTotal = uploadTotal
         self.connections = connections
         self.memory = memory
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.downloadTotal = try container.decodeIfPresent(Int64.self, forKey: .downloadTotal) ?? 0
+        self.uploadTotal = try container.decodeIfPresent(Int64.self, forKey: .uploadTotal) ?? 0
+        self.connections = try container.decodeIfPresent([ClashConnection].self, forKey: .connections) ?? []
+        self.memory = try container.decodeIfPresent(Int64.self, forKey: .memory)
     }
 }
 

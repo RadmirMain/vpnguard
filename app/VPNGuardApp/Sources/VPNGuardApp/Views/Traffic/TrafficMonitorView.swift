@@ -213,7 +213,12 @@ public struct TrafficMonitorView: View {
             }
             Button("Закрыть", role: .destructive) {
                 if let conn = connectionToClose {
-                    Task { await monitor.closeConnection(id: conn.id) }
+                    let targetId = conn.id
+                    Task {
+                        if await monitor.closeConnection(id: targetId) {
+                            frozenConnections.removeAll { $0.id == targetId }
+                        }
+                    }
                 }
                 connectionToClose = nil
             }
@@ -225,7 +230,11 @@ public struct TrafficMonitorView: View {
         .alert("Закрыть все соединения?", isPresented: $showCloseAllAlert) {
             Button("Отмена", role: .cancel) {}
             Button("Закрыть все", role: .destructive) {
-                Task { await monitor.closeAllConnections() }
+                Task {
+                    if await monitor.closeAllConnections() {
+                        frozenConnections.removeAll()
+                    }
+                }
             }
         } message: {
             Text("Это действие принудительно разорвёт все текущие сетевые сессии, проходящие через sing-box.")
@@ -433,9 +442,16 @@ public struct TrafficMonitorView: View {
 
             // Close group connections
             Button {
+                let ids = entry.connectionIds
                 Task {
-                    for id in entry.connectionIds {
-                        _ = await monitor.closeConnection(id: id)
+                    var closedIds: Set<String> = []
+                    for id in ids {
+                        if await monitor.closeConnection(id: id) {
+                            closedIds.insert(id)
+                        }
+                    }
+                    if !closedIds.isEmpty {
+                        frozenConnections.removeAll { closedIds.contains($0.id) }
                     }
                 }
             } label: {

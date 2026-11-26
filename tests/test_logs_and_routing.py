@@ -38,6 +38,30 @@ class TestLogsAndRouting(unittest.TestCase):
         self.assertIn("127.0.0.1:18088", cleaned)
         self.assertIn("1.1.1.1", cleaned)
 
+    def test_redact_sensitive_text_masks_trojan_ss_vmess_and_json_secrets(self):
+        raw = (
+            "trojan://topsecretpass@203.0.113.5:443?sni=example.com#T\n"
+            "ss://YWVzLTI1Ni1nY206c2VjcmV0@203.0.113.6:8388#SS\n"
+            "vmess://eyJhZGQiOiIyMDMuMC4xMTMuNyJ9\n"
+            '{"password": "my_json_password", "psk": "secret_psk_value", "privateKey": "priv_key_xyz"}\n'
+            "https://example.com/hook?token=tok_secret_1&auth=auth_secret_2\n"
+        )
+        cleaned = vpnguard.redact_sensitive_text(raw)
+        for leak in [
+            "topsecretpass",
+            "YWVzLTI1Ni1nY206c2VjcmV0",
+            "eyJhZGQiOiIyMDMuMC4xMTMuNyJ9",
+            "my_json_password",
+            "secret_psk_value",
+            "priv_key_xyz",
+            "tok_secret_1",
+            "auth_secret_2",
+        ]:
+            self.assertNotIn(leak, cleaned)
+        self.assertIn("trojan://[REDACTED]", cleaned)
+        self.assertIn("ss://[REDACTED]", cleaned)
+        self.assertIn("vmess://[REDACTED]", cleaned)
+
     def test_cmd_logs_json_returns_tail_150_and_redacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             sb_log = os.path.join(tmpdir, "sb.log")

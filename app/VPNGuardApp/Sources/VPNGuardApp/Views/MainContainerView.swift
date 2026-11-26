@@ -73,13 +73,17 @@ public struct MainContainerView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 7) {
                         Circle()
-                            .fill(vm.isProtectionActive ? VGTheme.statusProtected : (vm.pauseRemainingSeconds > 0 ? VGTheme.statusWarning : VGTheme.statusDanger))
+                            .fill(vm.isProtectionActive ? VGTheme.statusProtected : ((vm.pauseRemainingSeconds > 0 || vm.isTunnelRecovering) ? VGTheme.statusWarning : VGTheme.statusDanger))
                             .frame(width: 7, height: 7)
 
                         if let countdown = vm.menuBarPauseText {
                             Text("Пауза Wi-Fi (\(countdown))")
                                 .font(.system(size: 11, weight: .medium))
                                 .monospacedDigit()
+                                .foregroundStyle(VGTheme.statusWarning)
+                        } else if vm.isTunnelRecovering {
+                            Text("Kill-Switch активен")
+                                .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(VGTheme.statusWarning)
                         } else {
                             Text(vm.isProtectionActive ? "Защита активна" : "Защита отключена")
@@ -171,6 +175,12 @@ public struct MainContainerView: View {
                 vm.requestedNavigationSection = nil
             }
         }
+        .onChange(of: vm.requestedOpenUpdateSheet) { _, open in
+            if open {
+                showingUpdateSheet = true
+                vm.requestedOpenUpdateSheet = false
+            }
+        }
         .onDisappear {
             TrafficMonitorService.shared.stopMonitoring()
         }
@@ -222,7 +232,7 @@ private struct AppUpdateSheetView: View {
     @State private var showGitHubEmptyInfo: Bool = false
 
     private var preferLocalChannel: Bool {
-        releaseUpdater.status == .noReleasesYet && vm.updateCheckResult != nil
+        releaseUpdater.status == .noReleasesYet && vm.hasLocalUpdateScript && vm.updateCheckResult != nil
     }
 
     var body: some View {
@@ -355,7 +365,9 @@ private struct AppUpdateSheetView: View {
                 Button {
                     Task {
                         await releaseUpdater.checkForRelease(silent: false)
-                        await vm.checkForUpdates()
+                        if vm.hasLocalUpdateScript {
+                            await vm.checkForUpdates()
+                        }
                     }
                 } label: {
                     HStack(spacing: 5) {
@@ -408,7 +420,9 @@ private struct AppUpdateSheetView: View {
         .background(VGTheme.backgroundContent)
         .task {
             await releaseUpdater.checkForRelease(silent: false)
-            await vm.checkForUpdates()
+            if vm.hasLocalUpdateScript {
+                await vm.checkForUpdates()
+            }
         }
     }
 

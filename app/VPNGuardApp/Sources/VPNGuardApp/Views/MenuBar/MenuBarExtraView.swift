@@ -89,9 +89,10 @@ public struct MenuBarExtraView: View {
     // MARK: - Status Header
     private var statusHeader: some View {
         let isPaused = vm.pauseRemainingSeconds > 0
+        let isRecovering = vm.isTunnelRecovering
         let tint: Color = vm.isProtectionActive
             ? VGTheme.statusProtected
-            : (isPaused ? VGTheme.statusWarning : VGTheme.statusDanger)
+            : ((isPaused || isRecovering) ? VGTheme.statusWarning : VGTheme.statusDanger)
 
         return VGCard(padding: 12) {
             HStack(spacing: 12) {
@@ -101,13 +102,13 @@ public struct MenuBarExtraView: View {
                         .frame(width: 36, height: 36)
                         .shadow(color: vm.isProtectionActive ? tint.opacity(0.28) : .clear, radius: 8)
 
-                    Image(systemName: vm.isProtectionActive ? "shield.lefthalf.filled" : (isPaused ? "pause.circle.fill" : "shield.slash.fill"))
+                    Image(systemName: vm.isProtectionActive ? "shield.lefthalf.filled" : (isPaused ? "pause.circle.fill" : (isRecovering ? "exclamationmark.shield.fill" : "shield.slash.fill")))
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(tint)
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(vm.isProtectionActive ? "Защита активна" : (isPaused ? "Пауза Public Wi-Fi" : "Защита отключена"))
+                    Text(vm.isProtectionActive ? "Защита активна" : (isPaused ? "Пауза Public Wi-Fi" : (isRecovering ? "Kill-Switch активен" : "Защита отключена")))
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.primary)
 
@@ -126,7 +127,7 @@ public struct MenuBarExtraView: View {
                         .frame(width: 38, height: 22)
                 } else {
                     Toggle("", isOn: Binding(
-                        get: { vm.isProtectionActive },
+                        get: { vm.isKillSwitchArmed },
                         set: { _ in
                             Task { await vm.toggleProtection() }
                         }
@@ -134,9 +135,9 @@ public struct MenuBarExtraView: View {
                     .toggleStyle(.switch)
                     .controlSize(.small)
                     .labelsHidden()
-                    .tint(VGTheme.statusProtected)
+                    .tint(isRecovering ? VGTheme.statusWarning : VGTheme.statusProtected)
                     .disabled(vm.isTogglingPause)
-                    .help(vm.isProtectionActive ? "Отключить защиту VPNGuard" : "Включить защиту VPNGuard")
+                    .help(vm.isKillSwitchArmed ? "Отключить защиту VPNGuard" : "Включить защиту VPNGuard")
                 }
             }
         }
@@ -151,6 +152,9 @@ public struct MenuBarExtraView: View {
                 return loc
             }
             return "Туннель и PF Kill-Switch работают"
+        }
+        if vm.isTunnelRecovering {
+            return "PF Kill-Switch активен — туннель восстанавливается"
         }
         return "Прямой доступ без фильтрации"
     }
@@ -169,6 +173,7 @@ public struct MenuBarExtraView: View {
                 Spacer()
 
                 Button("Обновить") {
+                    vm.requestedOpenUpdateSheet = true
                     onOpenSettings()
                 }
                 .buttonStyle(.borderedProminent)
@@ -286,6 +291,7 @@ public struct MenuBarExtraView: View {
                 Menu {
                     ForEach(vm.servers) { server in
                         Button {
+                            guard !server.isActive else { return }
                             Task { await vm.activateServer(id: server.id) }
                         } label: {
                             HStack {
@@ -295,6 +301,7 @@ public struct MenuBarExtraView: View {
                                 Text(server.name)
                             }
                         }
+                        .disabled(server.isActive)
                     }
                 } label: {
                     HStack(spacing: 4) {
@@ -372,6 +379,8 @@ public struct MenuBarExtraView: View {
             return ip
         case .on(.idle):
             return "Определяется…"
+        case .tunnelRecovering:
+            return "Восстановление…"
         case .off, .turningOn, .turningOff:
             return "—"
         }

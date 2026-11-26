@@ -30,22 +30,22 @@ public struct DashboardView: View {
                                 Image(systemName: "power")
                                     .font(.system(size: 11, weight: .semibold))
                             }
-                            Text(vm.isProtectionActive ? "Отключить" : "Включить")
+                            Text(vm.isKillSwitchArmed ? "Отключить" : "Включить")
                                 .font(.system(size: 12, weight: .semibold))
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .background(
-                            vm.isProtectionActive
+                            vm.isKillSwitchArmed
                                 ? VGTheme.statusDanger.opacity(0.14)
                                 : VGTheme.statusProtected,
                             in: RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
                         )
-                        .foregroundStyle(vm.isProtectionActive ? VGTheme.statusDanger : .white)
+                        .foregroundStyle(vm.isKillSwitchArmed ? VGTheme.statusDanger : .white)
                         .overlay(
                             RoundedRectangle(cornerRadius: VGTheme.radiusControl, style: .continuous)
                                 .strokeBorder(
-                                    vm.isProtectionActive ? VGTheme.statusDanger.opacity(0.3) : .clear,
+                                    vm.isKillSwitchArmed ? VGTheme.statusDanger.opacity(0.3) : .clear,
                                     lineWidth: 0.75
                                 )
                         )
@@ -164,19 +164,19 @@ public struct DashboardView: View {
                             .fill((vm.isProtectionActive ? VGTheme.statusProtected : VGTheme.statusWarning).opacity(0.14))
                             .frame(width: 48, height: 48)
 
-                        Image(systemName: vm.isProtectionActive ? "checkmark.shield.fill" : "shield.slash.fill")
+                        Image(systemName: vm.isProtectionActive ? "checkmark.shield.fill" : (vm.isTunnelRecovering ? "exclamationmark.shield.fill" : "shield.slash.fill"))
                             .font(.system(size: 22, weight: .semibold))
                             .foregroundStyle(vm.isProtectionActive ? VGTheme.statusProtected : VGTheme.statusWarning)
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 8) {
-                            Text(vm.isProtectionActive ? "Защита VPNGuard активна" : "Защита VPNGuard отключена")
+                            Text(vm.isProtectionActive ? "Защита VPNGuard активна" : (vm.isTunnelRecovering ? "PF Kill-Switch активен" : "Защита VPNGuard отключена"))
                                 .font(.system(size: 16, weight: .semibold))
                                 .foregroundStyle(.primary)
 
                             VGStatusBadge(
-                                vm.isProtectionActive ? "Активен" : "Отключён",
+                                vm.isProtectionActive ? "Активен" : (vm.isTunnelRecovering ? "Восстановление" : "Отключён"),
                                 tone: vm.isProtectionActive ? .protected : .warning,
                                 showDot: true
                             )
@@ -185,7 +185,9 @@ public struct DashboardView: View {
                         Text(
                             vm.isProtectionActive
                                 ? "Трафик изолирован в Dual-GID туннеле. Защита от утечек и мигания включена."
-                                : "Сетевой фильтр деактивирован. Прямой доступ разрешён (режим Captive Portal)."
+                                : (vm.isTunnelRecovering
+                                    ? "PF Kill-Switch активен — туннель восстанавливается. Прямые утечки заблокированы."
+                                    : "Сетевой фильтр деактивирован. Прямой доступ разрешён (режим Captive Portal).")
                         )
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)

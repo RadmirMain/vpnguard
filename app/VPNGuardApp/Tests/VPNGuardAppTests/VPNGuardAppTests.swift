@@ -243,4 +243,40 @@ final class VPNGuardAppTests: XCTestCase {
         let upd = try JSONDecoder().decode(UpdateCheckResult.self, from: Data(updJson.utf8))
         XCTAssertEqual(upd.fetchFailed, true)
     }
+
+    func testClashConnectionSnapshotDecodesNullConnections() throws {
+        let json = """
+        {
+          "downloadTotal": 1024,
+          "uploadTotal": 256,
+          "connections": null,
+          "memory": 4096
+        }
+        """
+        let snap = try JSONDecoder().decode(ClashConnectionSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snap.downloadTotal, 1024)
+        XCTAssertEqual(snap.uploadTotal, 256)
+        XCTAssertTrue(snap.connections.isEmpty)
+        XCTAssertEqual(snap.memory, 4096)
+    }
+
+    func testProtectionStateTunnelRecoveringAndDomainValidation() {
+        let recovering = ProtectionState.tunnelRecovering
+        XCTAssertFalse(recovering.isProtectionActive)
+        XCTAssertTrue(recovering.isKillSwitchArmed)
+        XCTAssertTrue(recovering.isTunnelRecovering)
+        XCTAssertFalse(recovering.isTogglingPower)
+
+        XCTAssertTrue(VPNGuardViewModel.isValidDomainHost("example.com"))
+        XCTAssertTrue(VPNGuardViewModel.isValidDomainHost("sub.domain.ru"))
+        XCTAssertTrue(VPNGuardViewModel.isValidDomainHost("xn--e1afmkfd.xn--p1ai"))
+
+        XCTAssertFalse(VPNGuardViewModel.isValidDomainHost("*.example.com"))
+        XCTAssertFalse(VPNGuardViewModel.isValidDomainHost("foo bar.com"))
+        XCTAssertFalse(VPNGuardViewModel.isValidDomainHost("example.com/path"))
+        XCTAssertFalse(VPNGuardViewModel.isValidDomainHost("bad..example.com"))
+        XCTAssertFalse(VPNGuardViewModel.isValidDomainHost(".example.com"))
+        XCTAssertFalse(VPNGuardViewModel.isValidDomainHost("-bad.example.com"))
+        XCTAssertFalse(VPNGuardViewModel.isValidDomainHost("203.0.113.10"))
+    }
 }

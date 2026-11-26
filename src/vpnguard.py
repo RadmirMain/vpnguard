@@ -40,6 +40,11 @@ import grp
 import pwd
 import struct
 import tempfile
+import fcntl
+import select
+import signal
+import threading
+import contextlib
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Optional, Tuple, List, Callable
@@ -62,6 +67,7 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 DEFAULT_CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
 USER_CONFIG_PATH = os.path.expanduser("~/.vpnguard/config.json")
 RUN_DIR = "/var/run/vpnguard"
+STATE_LOCK_PATH = os.path.join(RUN_DIR, "state.lock")
 PAUSE_UNTIL_FILE = os.path.join(RUN_DIR, "pause_until")
 PAUSE_WATCHER_PID_FILE = os.path.join(RUN_DIR, "pause_watcher.pid")
 EXEC_HELPER_PATH = "/usr/local/bin/vpnguard-exec"
@@ -171,7 +177,96 @@ def write_desired_state(state: str, state_path: str = DESIRED_STATE_PATH) -> Non
 def _set_launchd_service_enabled(service_target: str, enabled: bool) -> None:
     """Enable or disable a system LaunchDaemon target via launchctl."""
     subcmd = "enable" if enabled else "disable"
-    subprocess.run(["launchctl", subcmd, service_target], capture_output=True)
+    try:
+        subprocess.run(["launchctl", subcmd, service_target], capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
+_STATE_LOCK_GUARD = threading.Lock()
+_STATE_LOCK_DEPTH = 0
+_STATE_LOCK_FD: Optional[int] = None
+
+
+def _resolve_state_lock_path(lock_path: Optional[str] = None) -> str:
+    """Resolve state lock file path, falling back to a user temp path in unprivileged tests."""
+    if lock_path:
+        return lock_path
+    if STATE_LOCK_PATH != "/var/run/vpnguard/state.lock":
+        return STATE_LOCK_PATH
+    if RUN_DIR != "/var/run/vpnguard":
+        return os.path.join(RUN_DIR, "state.lock")
+    if os.geteuid() == 0 and (os.access(RUN_DIR, os.W_OK) or (not os.path.exists(RUN_DIR) and os.access("/var/run", os.W_OK))):
+        return STATE_LOCK_PATH
+    return os.path.join(tempfile.gettempdir(), f"vpnguard_state_{os.getuid()}.lock")
+
+
+@contextlib.contextmanager
+def acquire_state_lock(timeout: float = 15.0, lock_path: Optional[str] = None):
+    """
+    Re-entrant, non-blocking exclusive flock with bounded timeout (10-15s).
+    Prevents concurrent state mutations across CLI invocations while allowing nested calls
+    (e.g., cmd_resume_if_expired / cmd_pause_watcher -> cmd_on) inside the same process.
+    """
+    global _STATE_LOCK_DEPTH, _STATE_LOCK_FD
+
+    with _STATE_LOCK_GUARD:
+        if _STATE_LOCK_DEPTH > 0:
+            _STATE_LOCK_DEPTH += 1
+            reentrant = True
+        else:
+            reentrant = False
+
+    if reentrant:
+        try:
+            yield
+        finally:
+            with _STATE_LOCK_GUARD:
+                _STATE_LOCK_DEPTH = max(0, _STATE_LOCK_DEPTH - 1)
+        return
+
+    target = _resolve_state_lock_path(lock_path)
+    parent = os.path.dirname(target) or "."
+    os.makedirs(parent, exist_ok=True)
+    fd = os.open(target, os.O_CREAT | os.O_RDWR, 0o644)
+    acquired = False
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"Timed out waiting for VPNGuard state lock after {timeout:.0f}s")
+                time.sleep(0.05)
+
+        with _STATE_LOCK_GUARD:
+            _STATE_LOCK_FD = fd
+            _STATE_LOCK_DEPTH = 1
+        yield
+    finally:
+        if acquired:
+            with _STATE_LOCK_GUARD:
+                _STATE_LOCK_DEPTH = max(0, _STATE_LOCK_DEPTH - 1)
+                should_release = (_STATE_LOCK_DEPTH == 0)
+                if should_release:
+                    _STATE_LOCK_FD = None
+            if should_release:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except Exception:
+                    pass
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+        else:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
 
 
 def _write_private_validation_file(prefix: str, payload: Dict[str, Any]) -> Tuple[str, str]:
@@ -229,12 +324,14 @@ def query_socks5_ip(host: str, port: int, timeout: float = 2.5) -> Optional[Dict
         ("https://api.ip.sb/geoip", "ipsb"),
         ("https://ifconfig.co/json", "ifconfig"),
     ]
+    proc_timeout = max(5.0, float(timeout) + 2.5)
     for url, kind in mirrors:
         try:
             res = subprocess.run(
                 ["curl", "-s", "--max-time", str(timeout), "-x", f"socks5h://{host}:{port}", url],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=proc_timeout,
             )
             if res.returncode == 0 and res.stdout.strip():
                 data = json.loads(res.stdout)
@@ -262,12 +359,14 @@ def query_socks5_ip(host: str, port: int, timeout: float = 2.5) -> Optional[Dict
 
 def query_http_proxy_ip(proxy_url: str, timeout: float = 2.5) -> Optional[Dict[str, Any]]:
     """Query egress IP through HTTP proxy using curl with fallback."""
+    proc_timeout = max(5.0, float(timeout) + 2.5)
     for url in ("https://ipinfo.io/json", "https://ifconfig.co/json"):
         try:
             res = subprocess.run(
                 ["curl", "-s", "--max-time", str(timeout), "-x", proxy_url, url],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=proc_timeout,
             )
             if res.returncode == 0 and res.stdout.strip():
                 data = json.loads(res.stdout)
@@ -281,12 +380,15 @@ def query_http_proxy_ip(proxy_url: str, timeout: float = 2.5) -> Optional[Dict[s
 
 
 def query_physical_ip(timeout: float = 2.5) -> Optional[Dict[str, Any]]:
-    """Query physical IP using curl bound directly to en0."""
+    """Query physical IP using curl bound directly to the active physical default interface."""
+    iface = _get_physical_default_interface() or "en0"
+    proc_timeout = max(5.0, float(timeout) + 2.5)
     try:
         res = subprocess.run(
-            ["curl", "-s", "--interface", "en0", "--max-time", str(timeout), "https://ipinfo.io/json"],
+            ["curl", "-s", "--interface", iface, "--max-time", str(timeout), "https://ipinfo.io/json"],
             capture_output=True,
-            text=True
+            text=True,
+            timeout=proc_timeout,
         )
         if res.returncode == 0 and res.stdout.strip():
             return json.loads(res.stdout)
@@ -295,10 +397,15 @@ def query_physical_ip(timeout: float = 2.5) -> Optional[Dict[str, Any]]:
     return None
 
 
-def run_privileged(cmd: List[str], capture_output: bool = True, text: bool = True) -> subprocess.CompletedProcess:
+def run_privileged(
+    cmd: List[str],
+    capture_output: bool = True,
+    text: bool = True,
+    timeout: float = 10.0,
+) -> subprocess.CompletedProcess:
     """Execute command directly when running as root, or via sudo -n otherwise."""
     full_cmd = cmd if os.geteuid() == 0 else ["sudo", "-n"] + cmd
-    return subprocess.run(full_cmd, capture_output=capture_output, text=text)
+    return subprocess.run(full_cmd, capture_output=capture_output, text=text, timeout=timeout)
 
 
 def read_stdin_bounded(max_bytes: int = MAX_STDIN_BYTES) -> str:
@@ -359,7 +466,7 @@ def _list_hardware_network_services() -> List[str]:
     """Return enabled macOS network services backed by physical en* interfaces."""
     services: List[str] = []
     try:
-        res = subprocess.run(["networksetup", "-listnetworkserviceorder"], capture_output=True, text=True)
+        res = subprocess.run(["networksetup", "-listnetworkserviceorder"], capture_output=True, text=True, timeout=5)
         if res.returncode != 0:
             return services
         current_svc: Optional[str] = None
@@ -384,7 +491,7 @@ def _list_hardware_network_services() -> List[str]:
 def _get_service_dns(service: str) -> List[str]:
     """Read configured DNS servers for a network service ([] means DHCP/Empty)."""
     try:
-        res = subprocess.run(["networksetup", "-getdnsservers", service], capture_output=True, text=True)
+        res = subprocess.run(["networksetup", "-getdnsservers", service], capture_output=True, text=True, timeout=5)
         if res.returncode != 0:
             return []
         out = res.stdout.strip()
@@ -536,17 +643,24 @@ def get_pf_status() -> Dict[str, Any]:
     }
 
     # 1. Check pf enabled
-    res_info = subprocess.run(["pfctl", "-s", "info"], capture_output=True, text=True)
-    if res_info.returncode != 0:
-        res_info = subprocess.run(["sudo", "-n", "pfctl", "-s", "info"], capture_output=True, text=True)
-    if res_info.returncode == 0 and "Status: Enabled" in res_info.stdout:
-        status["enabled"] = True
+    try:
+        res_info = subprocess.run(["pfctl", "-s", "info"], capture_output=True, text=True, timeout=5)
+        if res_info.returncode != 0:
+            res_info = subprocess.run(["sudo", "-n", "pfctl", "-s", "info"], capture_output=True, text=True, timeout=5)
+        if res_info.returncode == 0 and "Status: Enabled" in res_info.stdout:
+            status["enabled"] = True
+    except Exception:
+        pass
 
     # 2. Check main ruleset contains anchor vpnguard
-    res_sr = subprocess.run(["pfctl", "-sr"], capture_output=True, text=True)
-    if res_sr.returncode != 0:
-        res_sr = subprocess.run(["sudo", "-n", "pfctl", "-sr"], capture_output=True, text=True)
-    if res_sr.returncode == 0 and "vpnguard" in res_sr.stdout:
+    res_sr = None
+    try:
+        res_sr = subprocess.run(["pfctl", "-sr"], capture_output=True, text=True, timeout=5)
+        if res_sr.returncode != 0:
+            res_sr = subprocess.run(["sudo", "-n", "pfctl", "-sr"], capture_output=True, text=True, timeout=5)
+    except Exception:
+        res_sr = None
+    if res_sr is not None and res_sr.returncode == 0 and "vpnguard" in res_sr.stdout:
         status["main_anchor_linked"] = True
     elif os.path.exists("/etc/pf.conf"):
         try:
@@ -557,23 +671,30 @@ def get_pf_status() -> Dict[str, Any]:
             pass
 
     # 3. Check rules inside anchor vpnguard
-    res_rules = subprocess.run(["pfctl", "-a", "vpnguard", "-s", "rules"], capture_output=True, text=True)
-    if res_rules.returncode != 0:
-        res_rules = subprocess.run(["sudo", "-n", "pfctl", "-a", "vpnguard", "-s", "rules"], capture_output=True, text=True)
-    if res_rules.returncode == 0:
-        lines = [line.strip() for line in res_rules.stdout.strip().split("\n") if line.strip()]
-        status["rules"] = lines
-        status["rules_count"] = len(lines)
-        status["anchor_loaded"] = len(lines) > 0
-        status["has_group_888"] = any("888" in l for l in lines)
-        status["has_group_890"] = any("890" in l for l in lines)
-        status["has_global_killswitch"] = any("block return out quick" in l for l in lines)
+    try:
+        res_rules = subprocess.run(["pfctl", "-a", "vpnguard", "-s", "rules"], capture_output=True, text=True, timeout=5)
+        if res_rules.returncode != 0:
+            res_rules = subprocess.run(["sudo", "-n", "pfctl", "-a", "vpnguard", "-s", "rules"], capture_output=True, text=True, timeout=5)
+        if res_rules.returncode == 0:
+            lines = [line.strip() for line in res_rules.stdout.strip().split("\n") if line.strip()]
+            status["rules"] = lines
+            status["rules_count"] = len(lines)
+            status["anchor_loaded"] = len(lines) > 0
+            status["has_group_888"] = any("888" in l for l in lines)
+            status["has_group_890"] = any("890" in l for l in lines)
+            status["has_global_killswitch"] = any("block return out quick" in l for l in lines)
+    except Exception:
+        pass
 
     # 4. Check rules inside sub-anchor vpnguard/egress
-    res_egress = subprocess.run(["pfctl", "-a", "vpnguard/egress", "-s", "rules"], capture_output=True, text=True)
-    if res_egress.returncode != 0:
-        res_egress = subprocess.run(["sudo", "-n", "pfctl", "-a", "vpnguard/egress", "-s", "rules"], capture_output=True, text=True)
-    if res_egress.returncode == 0 and res_egress.stdout.strip():
+    res_egress = None
+    try:
+        res_egress = subprocess.run(["pfctl", "-a", "vpnguard/egress", "-s", "rules"], capture_output=True, text=True, timeout=5)
+        if res_egress.returncode != 0:
+            res_egress = subprocess.run(["sudo", "-n", "pfctl", "-a", "vpnguard/egress", "-s", "rules"], capture_output=True, text=True, timeout=5)
+    except Exception:
+        res_egress = None
+    if res_egress is not None and res_egress.returncode == 0 and res_egress.stdout.strip():
         eg_lines = [line.strip() for line in res_egress.stdout.strip().split("\n") if line.strip()]
         status["egress_rules"] = eg_lines
         status["rules_count"] += len(eg_lines)
@@ -594,10 +715,13 @@ def get_pf_status() -> Dict[str, Any]:
 def get_pf_blocked_packets() -> int:
     """Extract total packets blocked by kill-switch rules inside anchor vpnguard."""
     cmd = ["pfctl", "-a", "vpnguard", "-s", "rules", "-v"]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        res = subprocess.run(["sudo", "-n"] + cmd, capture_output=True, text=True)
-    if res.returncode != 0:
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if res.returncode != 0:
+            res = subprocess.run(["sudo", "-n"] + cmd, capture_output=True, text=True, timeout=5)
+        if res.returncode != 0:
+            return 0
+    except Exception:
         return 0
 
     lines = res.stdout.splitlines()
@@ -619,6 +743,33 @@ def get_pf_blocked_packets() -> int:
     return total_blocked
 
 
+def _get_daemon_pid(service_label: str, exact_proc_name: str) -> Optional[int]:
+    """Resolve daemon PID via launchctl print first, falling back to exact pgrep -x (never pgrep -f)."""
+    try:
+        res_lc = subprocess.run(
+            ["launchctl", "print", f"system/{service_label}"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if res_lc.returncode == 0 and "state = running" in res_lc.stdout:
+            m = re.search(r"^\s*pid\s*=\s*(\d+)", res_lc.stdout, re.MULTILINE)
+            if m:
+                pid_val = int(m.group(1))
+                if pid_val > 0:
+                    return pid_val
+    except Exception:
+        pass
+
+    try:
+        res = subprocess.run(["pgrep", "-x", exact_proc_name], capture_output=True, text=True, timeout=3)
+        if res.returncode == 0 and res.stdout.strip():
+            return int(res.stdout.strip().split()[0])
+    except Exception:
+        pass
+    return None
+
+
 def get_xray_process_status() -> Dict[str, Any]:
     """Inspect dedicated Xray proxy daemon process, user, and group."""
     info: Dict[str, Any] = {
@@ -630,16 +781,12 @@ def get_xray_process_status() -> Dict[str, Any]:
     }
 
     try:
-        res = subprocess.run(["pgrep", "-f", "xray.*vpnguard/xray.json"], capture_output=True, text=True)
-        if res.returncode != 0 or not res.stdout.strip():
-            res = subprocess.run(["pgrep", "-f", "vpnguard-xray"], capture_output=True, text=True)
-        if res.returncode == 0 and res.stdout.strip():
-            pids = res.stdout.strip().split()
-            target_pid = pids[0]
-            info["pid"] = int(target_pid)
+        pid_val = _get_daemon_pid("com.vpnguard.xray", "vpnguard-xray")
+        if pid_val is not None:
+            info["pid"] = pid_val
             info["running"] = True
 
-            res_ps = subprocess.run(["ps", "-o", "user,group,uid,gid", "-p", target_pid], capture_output=True, text=True)
+            res_ps = subprocess.run(["ps", "-o", "user,group,uid,gid", "-p", str(pid_val)], capture_output=True, text=True, timeout=3)
             if res_ps.returncode == 0:
                 lines = [l.strip() for l in res_ps.stdout.strip().split("\n") if l.strip()]
                 if len(lines) > 1:
@@ -666,13 +813,11 @@ def get_singbox_process_status() -> Dict[str, Any]:
         "gid": None
     }
     try:
-        res = subprocess.run(["pgrep", "-f", "vpnguard-singbox|sing-box.*sing-box.json"], capture_output=True, text=True)
-        if res.returncode == 0 and res.stdout.strip():
-            pids = res.stdout.strip().split()
-            target_pid = pids[0]
-            info["pid"] = int(target_pid)
+        pid_val = _get_daemon_pid("com.vpnguard.singbox", "vpnguard-singbox")
+        if pid_val is not None:
+            info["pid"] = pid_val
             info["running"] = True
-            res_ps = subprocess.run(["ps", "-o", "user,group,uid,gid", "-p", target_pid], capture_output=True, text=True)
+            res_ps = subprocess.run(["ps", "-o", "user,group,uid,gid", "-p", str(pid_val)], capture_output=True, text=True, timeout=3)
             if res_ps.returncode == 0:
                 lines = [l.strip() for l in res_ps.stdout.strip().split("\n") if l.strip()]
                 if len(lines) > 1:
@@ -691,7 +836,7 @@ def get_utun_status() -> Dict[str, Any]:
     """Inspect active utun interfaces and sing-box assigned IP."""
     info: Dict[str, Any] = {"active": False, "interface": None, "ip": None}
     try:
-        res = subprocess.run(["ifconfig", "utun99"], capture_output=True, text=True)
+        res = subprocess.run(["ifconfig", "utun99"], capture_output=True, text=True, timeout=3)
         if res.returncode == 0:
             info["active"] = True
             info["interface"] = "utun99"
@@ -702,7 +847,7 @@ def get_utun_status() -> Dict[str, Any]:
                     info["ip"] = parts[idx + 1]
                     break
         else:
-            res_all = subprocess.run(["ifconfig"], capture_output=True, text=True)
+            res_all = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=3)
             cur_if = None
             for line in res_all.stdout.splitlines():
                 if line and not line.startswith("\t"):
@@ -843,7 +988,7 @@ def notify(title: str, message: str) -> None:
     """Send native macOS notification safely using osascript argv."""
     try:
         script = "on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run"
-        subprocess.run(["osascript", "-e", script, str(title), str(message)], capture_output=True)
+        subprocess.run(["osascript", "-e", script, str(title), str(message)], capture_output=True, timeout=5)
     except Exception:
         pass
 
@@ -1358,7 +1503,7 @@ def _is_pause_watcher_alive(pid_file: Optional[str] = None) -> Optional[int]:
         if pid <= 0 or pid == os.getpid():
             return None
         os.kill(pid, 0)
-        res = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+        res = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=3)
         if res.returncode == 0 and "pause-watcher" in res.stdout:
             return pid
     except Exception:
@@ -1395,7 +1540,7 @@ def _disable_protection_core(quiet: bool = False) -> None:
         print(f"\n{C_BOLD}{C_YELLOW}=== ⚠️  Disabling VPNGuard Protection (Captive Portal Mode) ==={C_RESET}\n")
         print(f"{C_BOLD}[1/3] Disarming PF Kill-Switch...{C_RESET}")
 
-    res_pf = subprocess.run(["/usr/local/libexec/vpnguard-pf-boot.sh", "off"], capture_output=True, text=True)
+    res_pf = subprocess.run(["/usr/local/libexec/vpnguard-pf-boot.sh", "off"], capture_output=True, text=True, timeout=15)
     if not quiet:
         if res_pf.returncode == 0:
             print(f"    {C_GREEN}✓ PF Kill-Switch disarmed (Direct physical egress allowed){C_RESET}")
@@ -1403,9 +1548,9 @@ def _disable_protection_core(quiet: bool = False) -> None:
             print(f"    {C_RED}[!] Warning: {res_pf.stderr.strip()}{C_RESET}")
         print(f"\n{C_BOLD}[2/3] Stopping vpnguard-singbox TUN daemon...{C_RESET}")
 
-    subprocess.run(["launchctl", "bootout", "system/com.vpnguard.singbox"], capture_output=True)
+    subprocess.run(["launchctl", "bootout", "system/com.vpnguard.singbox"], capture_output=True, timeout=10)
     time.sleep(0.5)
-    subprocess.run(["pkill", "-9", "-f", "/usr/local/libexec/vpnguard-singbox"], capture_output=True)
+    subprocess.run(["pkill", "-9", "-x", "vpnguard-singbox"], capture_output=True, timeout=5)
     singbox = get_singbox_process_status()
     if not quiet:
         if not singbox["running"]:
@@ -1428,6 +1573,15 @@ def cmd_on(args: argparse.Namespace) -> int:
         print(f"{C_RED}[!] 'vpnguard on' requires root privileges. Run: sudo vpnguard on{C_RESET}", file=sys.stderr)
         return 1
 
+    try:
+        with acquire_state_lock():
+            return _cmd_on_locked(args)
+    except TimeoutError as e:
+        print(f"{C_RED}[!] {e}{C_RESET}", file=sys.stderr)
+        return 1
+
+
+def _cmd_on_locked(args: argparse.Namespace) -> int:
     # Cancel any pending Wi-Fi pause timer & watcher when enabling protection manually
     _clear_pause_state(kill_watcher=True)
 
@@ -1435,10 +1589,10 @@ def cmd_on(args: argparse.Namespace) -> int:
 
     # Disconnect conflicting Happ VPN if running
     try:
-        res_happ = subprocess.run(["scutil", "--nc", "list"], capture_output=True, text=True)
+        res_happ = subprocess.run(["scutil", "--nc", "list"], capture_output=True, text=True, timeout=5)
         if "Connected" in res_happ.stdout and "su.ffg.happ" in res_happ.stdout:
             print(f"{C_DIM}[i] Disconnecting conflicting Happ.app VPN...{C_RESET}")
-            subprocess.run(["scutil", "--nc", "stop", "Happ"], capture_output=True)
+            subprocess.run(["scutil", "--nc", "stop", "Happ"], capture_output=True, timeout=5)
             time.sleep(1.0)
     except Exception:
         pass
@@ -1489,7 +1643,7 @@ def cmd_on(args: argparse.Namespace) -> int:
         tmp_sb = f"{SINGBOX_CONF_PATH}.tmp_{os.getpid()}"
         atomic_write_text(tmp_sb, json.dumps(sb_cfg, indent=2, ensure_ascii=False), mode=0o600)
         sb_bin = SINGBOX_BIN if os.path.exists(SINGBOX_BIN) else "sing-box"
-        res_sb = subprocess.run([sb_bin, "check", "-c", tmp_sb], capture_output=True, text=True)
+        res_sb = subprocess.run([sb_bin, "check", "-c", tmp_sb], capture_output=True, text=True, timeout=10)
         if res_sb.returncode == 0:
             os.replace(tmp_sb, SINGBOX_CONF_PATH)
             os.chmod(SINGBOX_CONF_PATH, 0o600)
@@ -1510,7 +1664,7 @@ def cmd_on(args: argparse.Namespace) -> int:
     # 2. Arm PF anchor rules BEFORE starting daemons (Fail-Closed)
     print(f"\n{C_BOLD}[2/5] Arming System Fail-Closed PF Kill-Switch...{C_RESET}")
     _set_launchd_service_enabled("system/com.vpnguard.pf", True)
-    res_pf = subprocess.run(["/usr/local/libexec/vpnguard-pf-boot.sh", "on", "--no-dns-sync"], capture_output=True, text=True)
+    res_pf = subprocess.run(["/usr/local/libexec/vpnguard-pf-boot.sh", "on", "--no-dns-sync"], capture_output=True, text=True, timeout=15)
     if res_pf.returncode == 0:
         print(f"    {C_GREEN}✓ PF Kill-Switch armed successfully (Fail-Closed active){C_RESET}")
     else:
@@ -1521,8 +1675,8 @@ def cmd_on(args: argparse.Namespace) -> int:
     # 3. Start xray LaunchDaemon (GID 889)
     print(f"\n{C_BOLD}[3/5] Starting vpnguard-xray LaunchDaemon (GID 889)...{C_RESET}")
     _set_launchd_service_enabled("system/com.vpnguard.xray", True)
-    subprocess.run(["launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.vpnguard.xray.plist"], capture_output=True)
-    subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.xray"], capture_output=True)
+    subprocess.run(["launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.vpnguard.xray.plist"], capture_output=True, timeout=10)
+    subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.xray"], capture_output=True, timeout=10)
 
     xray_ready = False
     for _ in range(10):
@@ -1540,8 +1694,8 @@ def cmd_on(args: argparse.Namespace) -> int:
     # 4. Start sing-box LaunchDaemon (GID 890)
     print(f"\n{C_BOLD}[4/5] Starting vpnguard-singbox LaunchDaemon (GID 890)...{C_RESET}")
     _set_launchd_service_enabled("system/com.vpnguard.singbox", True)
-    subprocess.run(["launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.vpnguard.singbox.plist"], capture_output=True)
-    subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True)
+    subprocess.run(["launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.vpnguard.singbox.plist"], capture_output=True, timeout=10)
+    subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True, timeout=10)
 
     utun_ready = False
     for _ in range(15):
@@ -1580,11 +1734,16 @@ def cmd_off(args: argparse.Namespace) -> int:
         print(f"{C_RED}[!] 'vpnguard off' requires root privileges. Run: sudo vpnguard off{C_RESET}", file=sys.stderr)
         return 1
 
-    _clear_pause_state(kill_watcher=True)
-    write_desired_state("off")
-    _set_launchd_service_enabled("system/com.vpnguard.pf", False)
-    _set_launchd_service_enabled("system/com.vpnguard.singbox", False)
-    _disable_protection_core(quiet=False)
+    try:
+        with acquire_state_lock():
+            _clear_pause_state(kill_watcher=True)
+            write_desired_state("off")
+            _set_launchd_service_enabled("system/com.vpnguard.pf", False)
+            _set_launchd_service_enabled("system/com.vpnguard.singbox", False)
+            _disable_protection_core(quiet=False)
+    except TimeoutError as e:
+        print(f"{C_RED}[!] {e}{C_RESET}", file=sys.stderr)
+        return 1
 
     print(f"\n{C_BOLD}{C_GREEN}✅ Direct internet access restored. Captive portal login is now possible.{C_RESET}")
     print(f"{C_DIM}Run 'sudo vpnguard on' to re-enable fail-closed protection.{C_RESET}\n")
@@ -1607,23 +1766,28 @@ def cmd_pause(args: argparse.Namespace) -> int:
         print(json.dumps({"status": "error", "message": "Pause duration must be between 60 and 3600 seconds"}), file=sys.stderr)
         return 1
 
-    pause_until = int(time.time()) + seconds
-    os.makedirs(RUN_DIR, exist_ok=True)
-    atomic_write_text(PAUSE_UNTIL_FILE, f"{pause_until}\n", mode=0o644)
+    try:
+        with acquire_state_lock():
+            pause_until = int(time.time()) + seconds
+            os.makedirs(RUN_DIR, exist_ok=True)
+            atomic_write_text(PAUSE_UNTIL_FILE, f"{pause_until}\n", mode=0o644)
 
-    _disable_protection_core(quiet=True)
+            _disable_protection_core(quiet=True)
 
-    watcher_pid = _is_pause_watcher_alive()
-    if watcher_pid is None:
-        proc = subprocess.Popen(
-            [sys.executable, "-s", os.path.realpath(__file__), "pause-watcher"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        watcher_pid = proc.pid
-        atomic_write_text(PAUSE_WATCHER_PID_FILE, f"{watcher_pid}\n", mode=0o644)
+            watcher_pid = _is_pause_watcher_alive()
+            if watcher_pid is None:
+                proc = subprocess.Popen(
+                    [sys.executable, "-s", os.path.realpath(__file__), "pause-watcher"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                watcher_pid = proc.pid
+                atomic_write_text(PAUSE_WATCHER_PID_FILE, f"{watcher_pid}\n", mode=0o644)
+    except TimeoutError as e:
+        print(json.dumps({"status": "error", "message": str(e)}), file=sys.stderr)
+        return 1
 
     print(json.dumps({
         "status": "ok",
@@ -1639,19 +1803,35 @@ def cmd_pause_watcher(args: argparse.Namespace) -> int:
     if os.geteuid() != 0:
         return 1
 
-    while True:
-        target_ts = _read_pause_until()
-        if target_ts is None:
-            _clear_pause_state(kill_watcher=False)
-            return 0
+    try:
+        while True:
+            target_ts = _read_pause_until()
+            if target_ts is None:
+                return 0
 
-        if time.time() >= target_ts:
-            _clear_pause_state(kill_watcher=False)
-            cmd_on(argparse.Namespace(json=True, fast=True))
-            notify("🛡️ VPNGuard", "Пауза Wi-Fi завершена. Защита и Kill-Switch снова активны.")
-            return 0
+            if time.time() >= target_ts:
+                with acquire_state_lock():
+                    # Re-check under state lock so we never double-arm if resume-if-expired/on already ran
+                    latest_ts = _read_pause_until()
+                    if latest_ts is None or time.time() < latest_ts:
+                        if latest_ts is None:
+                            return 0
+                        continue
+                    rc = cmd_on(argparse.Namespace(json=True, fast=True))
+                if rc == 0:
+                    notify("🛡️ VPNGuard", "Пауза Wi-Fi завершена. Защита и Kill-Switch снова активны.")
+                return rc
 
-        time.sleep(5)
+            time.sleep(5)
+    finally:
+        if os.path.exists(PAUSE_WATCHER_PID_FILE):
+            try:
+                with open(PAUSE_WATCHER_PID_FILE, "r", encoding="utf-8") as f:
+                    recorded = int(f.read().strip())
+                if recorded == os.getpid():
+                    os.remove(PAUSE_WATCHER_PID_FILE)
+            except Exception:
+                pass
 
 
 def cmd_resume_if_expired(args: argparse.Namespace) -> int:
@@ -1660,25 +1840,30 @@ def cmd_resume_if_expired(args: argparse.Namespace) -> int:
         print(json.dumps({"status": "error", "message": "resume-if-expired requires root"}), file=sys.stderr)
         return 1
 
-    target_ts = _read_pause_until()
-    if target_ts is None:
-        print(json.dumps({"status": "noop", "reason": "no_pause"}))
-        return 0
+    try:
+        with acquire_state_lock():
+            target_ts = _read_pause_until()
+            if target_ts is None:
+                print(json.dumps({"status": "noop", "reason": "no_pause"}))
+                return 0
 
-    now = time.time()
-    if now >= target_ts:
-        _clear_pause_state(kill_watcher=True)
-        rc = cmd_on(argparse.Namespace(json=True, fast=True))
-        if rc == 0:
-            notify("🛡️ VPNGuard", "Защита автоматически восстановлена после паузы.")
-        return rc
+            now = time.time()
+            if now >= target_ts:
+                _clear_pause_state(kill_watcher=True)
+                rc = cmd_on(argparse.Namespace(json=True, fast=True))
+                if rc == 0:
+                    notify("🛡️ VPNGuard", "Защита автоматически восстановлена после паузы.")
+                return rc
 
-    print(json.dumps({
-        "status": "waiting",
-        "pauseUntil": target_ts,
-        "remaining": max(0, int(target_ts - now))
-    }))
-    return 0
+            print(json.dumps({
+                "status": "waiting",
+                "pauseUntil": target_ts,
+                "remaining": max(0, int(target_ts - now))
+            }))
+            return 0
+    except TimeoutError as e:
+        print(json.dumps({"status": "error", "message": str(e)}), file=sys.stderr)
+        return 1
 
 
 def _tail_file_lines(path: str, max_lines: int = 150) -> str:
@@ -1733,6 +1918,13 @@ def _collect_sensitive_literals() -> List[str]:
                     add_lit(rs.get("serverName"))
                     ts = stream.get("tlsSettings") or {}
                     add_lit(ts.get("serverName"))
+                    settings = out.get("settings") or {}
+                    for srv_entry in settings.get("servers") or []:
+                        add_lit(srv_entry.get("password"))
+                        add_lit(srv_entry.get("secret"))
+                    for vnext_entry in settings.get("vnext") or []:
+                        for u_entry in vnext_entry.get("users") or []:
+                            add_lit(u_entry.get("password"))
         except Exception:
             pass
 
@@ -1750,12 +1942,17 @@ def _collect_sensitive_literals() -> List[str]:
 
 
 def redact_sensitive_text(text: str, extra_secrets: Optional[List[str]] = None) -> str:
-    """Mask vless:// URIs, UUIDs, Reality keys, Bearer tokens, and configured relay hosts/IPs."""
+    """Mask vless/trojan/ss/vmess URIs, UUIDs, passwords, Reality keys, Bearer tokens, and configured relay hosts/IPs."""
     if not text:
         return text
 
     redacted = text
-    redacted = re.sub(r"vless://[^\s\"'<>]+", "vless://[REDACTED]", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(
+        r"\b(vless|trojan|ss|vmess)://[^\s\"'<>]+",
+        lambda m: f"{m.group(1).lower()}://[REDACTED]",
+        redacted,
+        flags=re.IGNORECASE,
+    )
     redacted = re.sub(
         r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",
         "[REDACTED_UUID]",
@@ -1763,15 +1960,16 @@ def redact_sensitive_text(text: str, extra_secrets: Optional[List[str]] = None) 
     )
     redacted = re.sub(r"(Bearer\s+)[A-Za-z0-9._\-]+", r"\1[REDACTED_SECRET]", redacted, flags=re.IGNORECASE)
     redacted = re.sub(
-        r"([?&](?:pbk|publicKey|sid|shortId)=)[^&\s#]+",
+        r"([?&](?:pbk|publicKey|sid|shortId|password|psk|secret|token|auth)=)[^&\s#]+",
         r"\1[REDACTED]",
         redacted,
         flags=re.IGNORECASE,
     )
     redacted = re.sub(
-        r'("(?:publicKey|shortId|secret|id)"\s*:\s*")[^"]+(")',
+        r'("(?:publicKey|shortId|secret|id|password|psk|privateKey|token|auth)"\s*:\s*")[^"]+(")',
         r"\1[REDACTED]\2",
         redacted,
+        flags=re.IGNORECASE,
     )
 
     for lit in (extra_secrets or []):
@@ -1896,6 +2094,15 @@ def cmd_rules_apply(args: argparse.Namespace) -> int:
         print(json.dumps({"status": "error", "message": err_msg}), file=sys.stderr)
         return 1
 
+    try:
+        with acquire_state_lock():
+            return _cmd_rules_apply_locked(new_rules)
+    except TimeoutError as e:
+        print(json.dumps({"status": "error", "message": str(e)}), file=sys.stderr)
+        return 1
+
+
+def _cmd_rules_apply_locked(new_rules: Dict[str, Any]) -> int:
     relay_ips, _ = get_active_relay_endpoint()
     try:
         sb_config = build_singbox_config(new_rules, relay_ip=relay_ips or None)
@@ -1912,7 +2119,7 @@ def cmd_rules_apply(args: argparse.Namespace) -> int:
 
     # Validate with sing-box check
     check_bin = SINGBOX_BIN if os.path.exists(SINGBOX_BIN) else "sing-box"
-    res_check = subprocess.run([check_bin, "check", "-c", tmp_sb_path], capture_output=True, text=True)
+    res_check = subprocess.run([check_bin, "check", "-c", tmp_sb_path], capture_output=True, text=True, timeout=10)
     if res_check.returncode != 0:
         if os.path.exists(tmp_sb_path):
             os.remove(tmp_sb_path)
@@ -1947,7 +2154,7 @@ def cmd_rules_apply(args: argparse.Namespace) -> int:
 
         sb_proc = get_singbox_process_status()
         if sb_proc["running"]:
-            subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True)
+            subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True, timeout=10)
             ready = False
             for _ in range(10):
                 time.sleep(0.3)
@@ -1959,7 +2166,7 @@ def cmd_rules_apply(args: argparse.Namespace) -> int:
                     atomic_write_text(RULES_FILE_PATH, prev_rules_bytes.decode("utf-8"), mode=0o644)
                 if prev_sb_bytes is not None:
                     atomic_write_text(SINGBOX_CONF_PATH, prev_sb_bytes.decode("utf-8"), mode=0o600)
-                subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True)
+                subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True, timeout=10)
                 print(json.dumps({"status": "error", "message": "sing-box failed health check after rules update; rolled back to .bak"}), file=sys.stderr)
                 return 1
 
@@ -2008,7 +2215,7 @@ def validate_xray_config(xray_data: Dict[str, Any]) -> Tuple[bool, str]:
         }
         tmp_dir, tmp_path = _write_private_validation_file("xray_val_", test_data)
 
-        res = subprocess.run([xray_bin, "run", "-test", "-c", tmp_path], capture_output=True, text=True)
+        res = subprocess.run([xray_bin, "run", "-test", "-c", tmp_path], capture_output=True, text=True, timeout=10)
         if res.returncode == 0:
             return True, "Configuration OK."
         else:
@@ -2467,7 +2674,8 @@ def save_servers_store(store: Dict[str, Any], store_path: Optional[str] = None) 
 def activate_server(server_id: str, store_path: Optional[str] = None) -> Tuple[bool, str]:
     """
     Atomically switch active upstream server to server_id with full rollback on failure.
-    Validates Xray and sing-box configurations before touching live firewall or daemons.
+    Resolves domains directly via GID 890 + IP_BOUND_IF (bypassing dead/old tunnels).
+    When VPN is OFF, updates configs without kickstarting daemons; when ON, verifies xray + utun99.
     """
     store = load_servers_store(store_path)
     server = None
@@ -2484,9 +2692,9 @@ def activate_server(server_id: str, store_path: Optional[str] = None) -> Tuple[b
         return False, "Server profile has invalid empty host address"
     port = int(server.get("port", 443))
 
-    resolved_ips = resolve_host_ipv4(host)
+    resolved_ips = resolve_ipv4_direct_via_gid890(host)
     if not resolved_ips:
-        return False, f"Failed to resolve host '{host}' to any IPv4 address"
+        return False, f"Failed to resolve host '{host}' to any IPv4 address via GID 890 direct DNS"
     server["resolvedIps"] = resolved_ips
 
     xray_config = server.get("xrayConfig")
@@ -2512,7 +2720,7 @@ def activate_server(server_id: str, store_path: Optional[str] = None) -> Tuple[b
     try:
         tmp_sb_dir, tmp_sb = _write_private_validation_file("singbox_val_", updated_sb)
         sb_bin = SINGBOX_BIN if os.path.exists(SINGBOX_BIN) else "sing-box"
-        res_sb = subprocess.run([sb_bin, "check", "-c", tmp_sb], capture_output=True, text=True)
+        res_sb = subprocess.run([sb_bin, "check", "-c", tmp_sb], capture_output=True, text=True, timeout=10)
         if res_sb.returncode != 0:
             err = res_sb.stderr.strip() or res_sb.stdout.strip()
             return False, f"Sing-box validation failed: {err}"
@@ -2523,7 +2731,24 @@ def activate_server(server_id: str, store_path: Optional[str] = None) -> Tuple[b
             except Exception:
                 pass
 
-    # BOTH CHECKS PASSED: Proceed to apply with .bak rollback backup
+    desired = read_desired_state()
+    sb_proc = get_singbox_process_status()
+    pf_info = get_pf_status()
+    vpn_active = (desired != "off") and (sb_proc.get("running", False) or pf_info.get("anchor_loaded", False))
+
+    # Offline activation: update persisted configs & active_server.json without kickstarting daemons
+    if not vpn_active:
+        try:
+            write_pf_egress_file(resolved_ips, port, PF_EGRESS_FILE)
+            atomic_write_text(XRAY_CONF_PATH, json.dumps(xray_config, indent=2, ensure_ascii=False), mode=0o640, group_name="vpnguard-proxy")
+            atomic_write_text(SINGBOX_CONF_PATH, json.dumps(updated_sb, indent=2, ensure_ascii=False), mode=0o600)
+            store["activeId"] = server_id
+            save_servers_store(store, store_path)
+            return True, f"Server '{server.get('name')}' activated (VPN is currently off)"
+        except Exception as e:
+            return False, f"Failed saving offline server configuration: {e}"
+
+    # BOTH CHECKS PASSED & VPN IS ACTIVE: Proceed to apply with .bak rollback backup
     prev_xray_bytes: Optional[bytes] = None
     if os.path.exists(XRAY_CONF_PATH):
         try:
@@ -2549,6 +2774,36 @@ def activate_server(server_id: str, store_path: Optional[str] = None) -> Tuple[b
             pass
 
     prev_active_id = store.get("activeId", "")
+    daemons_restarted = False
+
+    def _rollback_activation() -> None:
+        if prev_xray_bytes is not None:
+            try:
+                atomic_write_text(XRAY_CONF_PATH, prev_xray_bytes.decode("utf-8"), mode=0o640, group_name="vpnguard-proxy")
+            except Exception:
+                pass
+        if prev_sb_bytes is not None:
+            try:
+                atomic_write_text(SINGBOX_CONF_PATH, prev_sb_bytes.decode("utf-8"), mode=0o600)
+            except Exception:
+                pass
+        if prev_egress_text is not None:
+            try:
+                atomic_write_text(PF_EGRESS_FILE, prev_egress_text, mode=0o644)
+                run_privileged(["pfctl", "-a", "vpnguard/egress", "-f", PF_EGRESS_FILE], timeout=10)
+            except Exception:
+                pass
+        store["activeId"] = prev_active_id
+        try:
+            save_servers_store(store, store_path)
+        except Exception:
+            pass
+        if daemons_restarted:
+            for svc in ("system/com.vpnguard.xray", "system/com.vpnguard.singbox"):
+                try:
+                    subprocess.run(["launchctl", "kickstart", "-k", svc], capture_output=True, timeout=10)
+                except Exception:
+                    pass
 
     try:
         if prev_xray_bytes is not None:
@@ -2570,56 +2825,45 @@ def activate_server(server_id: str, store_path: Optional[str] = None) -> Tuple[b
         save_servers_store(store, store_path)
 
         # 4. Kickstart services
-        subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.xray"], capture_output=True)
-        subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True)
+        daemons_restarted = True
+        subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.xray"], capture_output=True, timeout=10)
+        subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True, timeout=10)
 
-        # 5. Monitor for up to 5 seconds: verify both daemons stay up
-        start_wait = time.time()
+        # 5. Monitor for up to 6 seconds: verify xray ports AND utun99 come up
         daemons_ok = False
-        while time.time() - start_wait < 5.0:
+        last_failures: List[str] = []
+        for _ in range(12):
             time.sleep(0.5)
             x_stat = get_xray_process_status()
             s_stat = get_singbox_process_status()
             p_socks = check_port_listening("127.0.0.1", 18088, timeout=0.3)
             p_http = check_port_listening("127.0.0.1", 18089, timeout=0.3)
-            if x_stat.get("running") and s_stat.get("running") and p_socks and p_http:
+            u_stat = get_utun_status()
+            last_failures = []
+            if not x_stat.get("running"):
+                last_failures.append("xray stopped")
+            if not s_stat.get("running"):
+                last_failures.append("sing-box stopped")
+            if not p_socks:
+                last_failures.append("127.0.0.1:18088 closed")
+            if not p_http:
+                last_failures.append("127.0.0.1:18089 closed")
+            if not u_stat.get("active"):
+                last_failures.append("utun99 inactive")
+            if not last_failures:
                 daemons_ok = True
                 break
 
         if not daemons_ok:
-            print(f"{C_RED}[!] Daemons failed to stabilize within 5s. Rolling back...{C_RESET}", file=sys.stderr)
-            if prev_xray_bytes is not None:
-                atomic_write_text(XRAY_CONF_PATH, prev_xray_bytes.decode("utf-8"), mode=0o640, group_name="vpnguard-proxy")
-            if prev_sb_bytes is not None:
-                atomic_write_text(SINGBOX_CONF_PATH, prev_sb_bytes.decode("utf-8"), mode=0o600)
-            if prev_egress_text is not None:
-                atomic_write_text(PF_EGRESS_FILE, prev_egress_text, mode=0o644)
-                run_privileged(["pfctl", "-a", "vpnguard/egress", "-f", PF_EGRESS_FILE])
-            store["activeId"] = prev_active_id
-            save_servers_store(store, store_path)
-            subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.xray"], capture_output=True)
-            subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True)
-            return False, "Daemons failed health check after activation. Rollback successfully performed."
+            print(f"{C_RED}[!] Daemons failed to stabilize within 6s. Rolling back...{C_RESET}", file=sys.stderr)
+            _rollback_activation()
+            detail = ", ".join(last_failures) if last_failures else "health check failed"
+            return False, f"Daemons failed health check after activation ({detail}). Rollback successfully performed."
 
         flush_dns_cache()
         return True, f"Server '{server.get('name')}' successfully activated"
     except Exception as e:
-        if prev_xray_bytes is not None:
-            try:
-                atomic_write_text(XRAY_CONF_PATH, prev_xray_bytes.decode("utf-8"), mode=0o640, group_name="vpnguard-proxy")
-            except Exception:
-                pass
-        if prev_sb_bytes is not None:
-            try:
-                atomic_write_text(SINGBOX_CONF_PATH, prev_sb_bytes.decode("utf-8"), mode=0o600)
-            except Exception:
-                pass
-        if prev_egress_text is not None:
-            try:
-                atomic_write_text(PF_EGRESS_FILE, prev_egress_text, mode=0o644)
-                run_privileged(["pfctl", "-a", "vpnguard/egress", "-f", PF_EGRESS_FILE])
-            except Exception:
-                pass
+        _rollback_activation()
         return False, f"Failed applying server configuration: {e}"
 
 
@@ -2763,14 +3007,15 @@ def cmd_server_activate(args: argparse.Namespace) -> int:
     """Atomically activate upstream server profile by ID."""
     try:
         server_id = _resolve_server_id_arg(args)
-        store = load_servers_store()
-        if not any(s.get("id") == server_id for s in store.get("servers", [])):
-            raise ValueError(f"Server ID '{server_id}' not found in servers.json")
+        with acquire_state_lock(timeout=15.0):
+            store = load_servers_store()
+            if not any(s.get("id") == server_id for s in store.get("servers", [])):
+                raise ValueError(f"Server ID '{server_id}' not found in servers.json")
+            success, msg = activate_server(server_id)
     except Exception as e:
         print(json.dumps({"status": "error", "message": str(e)}, indent=2, ensure_ascii=False), file=sys.stderr)
         return 1
 
-    success, msg = activate_server(server_id)
     if success:
         print(json.dumps({
             "status": "ok",
@@ -2898,7 +3143,7 @@ def _parse_dns_a_response(packet: bytes, expected_tx_id: int) -> List[str]:
     return ips
 
 
-def _run_in_gid890_worker(fn: Callable[[], Any]) -> Any:
+def _run_in_gid890_worker(fn: Callable[[], Any], timeout: float = 10.0) -> Any:
     """
     Execute fn inside a short-lived forked child dropped to GID 890 + UID nobody.
     PF allows group 890 direct IPv4 TCP/UDP egress bypassing utun99 when bound via IP_BOUND_IF.
@@ -2944,18 +3189,36 @@ def _run_in_gid890_worker(fn: Callable[[], Any]) -> Any:
 
     os.close(write_fd)
     chunks: List[bytes] = []
+    deadline = time.monotonic() + max(0.5, timeout)
+    timed_out = False
     try:
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            ready, _, _ = select.select([read_fd], [], [], remaining)
+            if not ready:
+                timed_out = True
+                break
             chunk = os.read(read_fd, 65536)
             if not chunk:
                 break
             chunks.append(chunk)
     finally:
         os.close(read_fd)
+        if timed_out:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
         try:
             os.waitpid(pid, 0)
         except Exception:
             pass
+
+    if timed_out:
+        raise TimeoutError(f"GID 890 worker timed out after {timeout:.1f}s")
 
     raw = b"".join(chunks).decode("utf-8", errors="replace").strip()
     if not raw:
@@ -3088,11 +3351,11 @@ def cmd_server_sync_pf(args: argparse.Namespace) -> int:
             tmp_sb = f"{SINGBOX_CONF_PATH}.tmp_{os.getpid()}"
             atomic_write_text(tmp_sb, json.dumps(updated_sb, indent=2, ensure_ascii=False), mode=0o600)
             sb_bin = SINGBOX_BIN if os.path.exists(SINGBOX_BIN) else "sing-box"
-            if subprocess.run([sb_bin, "check", "-c", tmp_sb], capture_output=True).returncode == 0:
+            if subprocess.run([sb_bin, "check", "-c", tmp_sb], capture_output=True, timeout=10).returncode == 0:
                 os.replace(tmp_sb, SINGBOX_CONF_PATH)
                 os.chmod(SINGBOX_CONF_PATH, 0o600)
                 if get_singbox_process_status().get("running"):
-                    subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True)
+                    subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True, timeout=10)
             elif os.path.exists(tmp_sb):
                 os.remove(tmp_sb)
         except Exception:
@@ -3298,25 +3561,26 @@ def cmd_server_update(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        store = load_servers_store()
-        # Keep existing profile ID if matching host+port+name, else append new profile
-        existing = next(
-            (s for s in store.get("servers", [])
-             if s.get("host") == profile["host"] and s.get("port") == profile["port"] and s.get("name") == profile["name"]),
-            None
-        )
-        if existing:
-            existing.update({k: v for k, v in profile.items() if k != "id"})
-            target_id = existing["id"]
-        else:
-            store.setdefault("servers", []).append(profile)
-            target_id = profile["id"]
-        save_servers_store(store)
+        with acquire_state_lock(timeout=15.0):
+            store = load_servers_store()
+            # Keep existing profile ID if matching host+port+name, else append new profile
+            existing = next(
+                (s for s in store.get("servers", [])
+                 if s.get("host") == profile["host"] and s.get("port") == profile["port"] and s.get("name") == profile["name"]),
+                None
+            )
+            if existing:
+                existing.update({k: v for k, v in profile.items() if k != "id"})
+                target_id = existing["id"]
+            else:
+                store.setdefault("servers", []).append(profile)
+                target_id = profile["id"]
+            save_servers_store(store)
+            ok, msg = activate_server(target_id)
     except Exception as e:
-        print(json.dumps({"status": "error", "message": f"Failed saving server profile: {e}"}), file=sys.stderr)
+        print(json.dumps({"status": "error", "message": f"Failed saving/activating server profile: {e}"}), file=sys.stderr)
         return 1
 
-    ok, msg = activate_server(target_id)
     if not ok:
         print(json.dumps({"status": "error", "message": msg}), file=sys.stderr)
         return 1
@@ -3340,6 +3604,14 @@ def cmd_test(args: argparse.Namespace) -> int:
     results: List[Tuple[str, bool, str]] = []
     helper_path = EXEC_HELPER_PATH if os.path.exists(EXEC_HELPER_PATH) else LOCAL_EXEC_HELPER
     target_user = os.environ.get("SUDO_USER")
+    if os.geteuid() == 0 and (not target_user or target_user == "root"):
+        try:
+            cu = subprocess.run(["stat", "-f", "%Su", "/dev/console"], capture_output=True, text=True, timeout=5)
+            console_user = cu.stdout.strip()
+            if cu.returncode == 0 and console_user and console_user != "root":
+                target_user = console_user
+        except Exception:
+            pass
     helper_prefix = ["sudo", "-u", target_user] if (os.geteuid() == 0 and target_user and target_user != "root") else []
     helper_runner = helper_prefix + [helper_path]
     config = load_config()
@@ -3378,7 +3650,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             "        pass\n"
             "sys.exit(1)\n"
         )
-        res_happ = subprocess.run(helper_runner + [sys.executable, "-c", test_happ], capture_output=True)
+        res_happ = subprocess.run(helper_runner + [sys.executable, "-c", test_happ], capture_output=True, timeout=15)
         happ_blocked = (res_happ.returncode != 0)
         results.append((
             "3. Happ Decoupling Prevention (lo0:10808/10809 blocked)",
@@ -3432,7 +3704,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             "except Exception:\n"
             "    sys.exit(1)\n"
         )
-        res_v4 = subprocess.run(helper_runner + [sys.executable, "-c", test_v4], capture_output=True)
+        res_v4 = subprocess.run(helper_runner + [sys.executable, "-c", test_v4], capture_output=True, timeout=15)
         blocked_v4 = (res_v4.returncode != 0)
         results.append((
             "6. Direct IPv4 TCP Bypass Prevention (1.1.1.1:80 direct)",
@@ -3454,7 +3726,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             "except Exception:\n"
             "    sys.exit(1)\n"
         )
-        res_v6 = subprocess.run(helper_runner + [sys.executable, "-c", test_v6], capture_output=True)
+        res_v6 = subprocess.run(helper_runner + [sys.executable, "-c", test_v6], capture_output=True, timeout=15)
         blocked_v6 = (res_v6.returncode != 0)
         results.append((
             "7. Direct IPv6 TCP Bypass Prevention ([2606:..]:80 direct)",
@@ -3477,7 +3749,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             "except Exception:\n"
             "    sys.exit(1)\n"
         )
-        res_udp = subprocess.run(helper_runner + [sys.executable, "-c", test_udp], capture_output=True)
+        res_udp = subprocess.run(helper_runner + [sys.executable, "-c", test_udp], capture_output=True, timeout=15)
         blocked_udp = (res_udp.returncode != 0)
         results.append((
             "8. Direct UDP DNS Leak Prevention (1.1.1.1:53 unproxied)",
@@ -3489,7 +3761,7 @@ def cmd_test(args: argparse.Namespace) -> int:
 
     # Test 9: Anti-LPE Security Check (Root execution prohibited)
     if os.path.exists(helper_path):
-        res_root = subprocess.run(["sudo", "-n", helper_path, "/bin/ls"], capture_output=True, text=True)
+        res_root = subprocess.run(["sudo", "-n", helper_path, "/bin/ls"], capture_output=True, text=True, timeout=10)
         root_rejected = (res_root.returncode != 0 and (
             "a password is required" in res_root.stderr or
             "SECURITY VIOLATION" in res_root.stderr
@@ -3520,7 +3792,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             "}\n"
             "print(json.dumps(data))\n"
         )
-        res_env = subprocess.run(helper_runner + [sys.executable, "-c", code_env], capture_output=True, text=True)
+        res_env = subprocess.run(helper_runner + [sys.executable, "-c", code_env], capture_output=True, text=True, timeout=15)
         lines = [l.strip() for l in res_env.stdout.strip().split("\n") if l.strip().startswith("{")]
         env_ok = False
         details = "Failed to read environment from sandbox"
@@ -3581,7 +3853,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             "            time.sleep(0.5)\n"
             "print(json.dumps({'foreign': ip_foreign, 'mirror': ip_mirror}))\n"
         )
-        res_dual = subprocess.run(helper_runner + [sys.executable, "-c", code_dual], capture_output=True, text=True)
+        res_dual = subprocess.run(helper_runner + [sys.executable, "-c", code_dual], capture_output=True, text=True, timeout=25)
         lines = [l.strip() for l in res_dual.stdout.strip().split("\n") if l.strip().startswith("{")]
         dual_ok = False
 
@@ -3645,7 +3917,8 @@ def cmd_test(args: argparse.Namespace) -> int:
             res_tun = subprocess.run(
                 ["curl", "-s", "--noproxy", "*", "--max-time", "5", "https://api.ipify.org?format=json"],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=10
             )
             tun_ip = ""
             if res_tun.returncode == 0 and res_tun.stdout.strip():
@@ -3666,7 +3939,7 @@ def cmd_test(args: argparse.Namespace) -> int:
                     "except Exception:\n"
                     "    sys.exit(1)\n"
                 )
-                res_lan = subprocess.run(helper_runner + [sys.executable, "-c", code_lan_dns], capture_output=True)
+                res_lan = subprocess.run(helper_runner + [sys.executable, "-c", code_lan_dns], capture_output=True, timeout=15)
                 lan_dns_blocked = (res_lan.returncode != 0)
 
             if tun_ip and tun_ip != phys_ip and lan_dns_blocked:

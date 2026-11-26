@@ -6,12 +6,23 @@ public struct AppsManagementView: View {
     @State private var showingPickerSheet: Bool = false
     @State private var filterQuery: String = ""
 
-    private var filteredApps: [Binding<AppRule>] {
-        $vm.rules.apps.filter { binding in
+    private var filteredApps: [AppRule] {
+        vm.rules.apps.filter { app in
             if filterQuery.isEmpty { return true }
-            return binding.wrappedValue.name.localizedCaseInsensitiveContains(filterQuery) ||
-                   binding.wrappedValue.bundlePath.localizedCaseInsensitiveContains(filterQuery)
+            return app.name.localizedCaseInsensitiveContains(filterQuery) ||
+                   app.bundlePath.localizedCaseInsensitiveContains(filterQuery)
         }
+    }
+
+    private func binding(for app: AppRule) -> Binding<AppRule> {
+        Binding(
+            get: { vm.rules.apps.first(where: { $0.id == app.id }) ?? app },
+            set: { updated in
+                if let idx = vm.rules.apps.firstIndex(where: { $0.id == app.id }) {
+                    vm.rules.apps[idx] = updated
+                }
+            }
+        )
     }
 
     public var body: some View {
@@ -69,9 +80,9 @@ public struct AppsManagementView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 8) {
-                        ForEach(filteredApps) { $app in
+                        ForEach(filteredApps) { app in
                             AppRuleRow(
-                                app: $app,
+                                app: binding(for: app),
                                 onChanged: { vm.hasUnappliedChanges = true },
                                 onDelete: { vm.removeApp(id: app.id) }
                             )
