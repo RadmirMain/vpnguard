@@ -49,7 +49,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Optional, Tuple, List, Callable
 
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 
 # ANSI color codes
 C_RESET   = "\033[0m"

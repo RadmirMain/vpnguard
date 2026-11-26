@@ -26,9 +26,12 @@ jobs:
         working-directory: app/VPNGuardApp
         run: swift test
 
+      - name: Install sing-box and xray for offline config validation tests
+        run: brew install sing-box xray
+
       - name: Run Python unit tests
         run: |
-          python3 -m unittest tests/test_launcher.py tests/test_pf_syntax.py tests/test_singbox_config.py tests/test_vless_parser.py tests/test_logs_and_routing.py tests/test_pause_and_ping.py
+          python3 -m unittest tests/test_pf_syntax.py tests/test_singbox_config.py tests/test_vless_parser.py tests/test_logs_and_routing.py tests/test_pause_resume.py tests/test_server_ping.py -v
 
       - name: Determine release version
         id: ver
