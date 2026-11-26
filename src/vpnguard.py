@@ -1601,7 +1601,11 @@ def _disable_protection_core(quiet: bool = False) -> None:
             print(f"    {C_RED}[!] Warning: {res_pf.stderr.strip()}{C_RESET}")
         print(f"\n{C_BOLD}[2/3] Stopping vpnguard-singbox TUN daemon...{C_RESET}")
 
-    subprocess.run(["launchctl", "bootout", "system/com.vpnguard.singbox"], capture_output=True, timeout=10)
+    try:
+        subprocess.run(["launchctl", "bootout", "system/com.vpnguard.singbox"], capture_output=True, timeout=15)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        if not quiet:
+            print(f"    {C_YELLOW}[!] launchctl bootout singbox warning: {e}{C_RESET}", file=sys.stderr)
     time.sleep(0.5)
     subprocess.run(["pkill", "-9", "-x", "vpnguard-singbox"], capture_output=True, timeout=5)
     singbox = get_singbox_process_status()
@@ -1618,6 +1622,41 @@ def _disable_protection_core(quiet: bool = False) -> None:
             print(f"    {C_GREEN}✓ {dns_msg}{C_RESET}")
         else:
             print(f"    {C_YELLOW}[!] {dns_msg}{C_RESET}")
+
+
+def _launchctl_start_or_restart(service: str, plist_path: str, timeout: int = 15) -> Tuple[bool, str]:
+    """Start an unloaded LaunchDaemon via bootstrap (RunAtLoad), or kickstart -k if already loaded."""
+    is_loaded = False
+    try:
+        probe = subprocess.run(["launchctl", "print", service], capture_output=True, text=True, timeout=5)
+        is_loaded = (probe.returncode == 0)
+    except (subprocess.TimeoutExpired, OSError):
+        is_loaded = False
+
+    if not is_loaded:
+        try:
+            res = subprocess.run(["launchctl", "bootstrap", "system", plist_path], capture_output=True, text=True, timeout=timeout)
+            if res.returncode == 0:
+                return True, ""
+            # If race-loaded meanwhile, fall through to kickstart -k
+            err = res.stderr.strip() or res.stdout.strip() or f"bootstrap exited {res.returncode}"
+            if "already" not in err.lower() and "in progress" not in err.lower():
+                return False, f"launchctl bootstrap {service}: {err}"
+        except subprocess.TimeoutExpired:
+            return False, f"launchctl bootstrap {service} timed out after {timeout}s"
+        except OSError as e:
+            return False, f"launchctl bootstrap {service} error: {e}"
+
+    try:
+        res = subprocess.run(["launchctl", "kickstart", "-k", service], capture_output=True, text=True, timeout=timeout)
+        if res.returncode == 0:
+            return True, ""
+        err = res.stderr.strip() or res.stdout.strip() or f"kickstart exited {res.returncode}"
+        return False, f"launchctl kickstart {service}: {err}"
+    except subprocess.TimeoutExpired:
+        return False, f"launchctl kickstart {service} timed out after {timeout}s"
+    except OSError as e:
+        return False, f"launchctl kickstart {service} error: {e}"
 
 
 def cmd_on(args: argparse.Namespace) -> int:
@@ -1720,8 +1759,9 @@ def _cmd_on_locked(args: argparse.Namespace) -> int:
     print(f"\n{C_BOLD}[3/5] Starting vpnguard-xray LaunchDaemon (GID 889)...{C_RESET}")
     rotate_log_if_needed(LOG_XRAY_PATH, owner_user="_vpnguard_proxy", group_name="vpnguard-proxy")
     _set_launchd_service_enabled("system/com.vpnguard.xray", True)
-    subprocess.run(["launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.vpnguard.xray.plist"], capture_output=True, timeout=10)
-    subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.xray"], capture_output=True, timeout=10)
+    xray_lc_ok, xray_lc_err = _launchctl_start_or_restart("system/com.vpnguard.xray", "/Library/LaunchDaemons/com.vpnguard.xray.plist")
+    if not xray_lc_ok and xray_lc_err:
+        print(f"    {C_YELLOW}[!] {xray_lc_err}{C_RESET}", file=sys.stderr)
 
     xray_ready = False
     for _ in range(10):
@@ -1740,8 +1780,9 @@ def _cmd_on_locked(args: argparse.Namespace) -> int:
     print(f"\n{C_BOLD}[4/5] Starting vpnguard-singbox LaunchDaemon (GID 890)...{C_RESET}")
     rotate_log_if_needed(LOG_SINGBOX_PATH)
     _set_launchd_service_enabled("system/com.vpnguard.singbox", True)
-    subprocess.run(["launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.vpnguard.singbox.plist"], capture_output=True, timeout=10)
-    subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True, timeout=10)
+    sb_lc_ok, sb_lc_err = _launchctl_start_or_restart("system/com.vpnguard.singbox", "/Library/LaunchDaemons/com.vpnguard.singbox.plist")
+    if not sb_lc_ok and sb_lc_err:
+        print(f"    {C_YELLOW}[!] {sb_lc_err}{C_RESET}", file=sys.stderr)
 
     utun_ready = False
     for _ in range(15):
@@ -2221,7 +2262,10 @@ def _cmd_rules_apply_locked(new_rules: Dict[str, Any]) -> int:
 
         sb_proc = get_singbox_process_status()
         if sb_proc["running"]:
-            subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True, timeout=10)
+            try:
+                subprocess.run(["launchctl", "kickstart", "-k", "system/com.vpnguard.singbox"], capture_output=True, timeout=15)
+            except subprocess.TimeoutExpired:
+                pass
             ready = False
             for _ in range(10):
                 time.sleep(0.3)
@@ -4332,7 +4376,23 @@ def main() -> int:
         p_server.print_help()
         return 1
 
-    return args.func(args)
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        return 130
+    except Exception as exc:
+        import traceback
+        tb_text = traceback.format_exc()
+        if os.geteuid() == 0:
+            try:
+                cli_log = "/var/log/vpnguard-cli.log"
+                rotate_log_if_needed(cli_log)
+                with open(cli_log, "a", encoding="utf-8") as lf:
+                    lf.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n{tb_text}")
+            except Exception:
+                pass
+        print(f"{C_RED}[!] Internal error: {type(exc).__name__}: {exc}{C_RESET}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

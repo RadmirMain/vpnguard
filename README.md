@@ -68,29 +68,29 @@
 Приложение на SwiftUI (macOS 14+, MVVM) устанавливается в `/Applications/VPNGuard.app` и работает как в основном окне, так и в Menu Bar:
 
 1. **Menu Bar (`MenuBarExtra`)**:
-   - Мастер-переключатель защиты и живой статус туннеля (*«Связь через туннель: ОК · N мс»*).
-   - **Пауза на 5 мин / 15 мин (вход в Wi-Fi)** с обратным отсчётом прямо в строке меню и fail-safe автовозвратом (на системном уровне через `/var/run/vpnguard/pause_until`, работает даже при закрытом GUI или после сна Mac).
-   - Быстрый запуск **«Открыть защищённый браузер»** (прямой запуск `vpnguard-browser` в песочнице `GID 888` без `sudo`).
-   - Быстрая смена активного сервера и переход к аудиту утечек.
+   - Мастер-переключатель защиты (включая жёлтый статус *«PF Kill-Switch активен — туннель восстанавливается»* с возможностью отключения) и живой статус туннеля (*«Связь через туннель: ОК · N мс»*).
+   - **Пауза на 5 мин / 15 мин (вход в Wi-Fi)** с локальным обратным отсчётом `TimelineView` и fail-safe автовозвратом через `/var/run/vpnguard/pause_until` (переживает сон Mac и закрытие GUI).
+   - Быстрый запуск **«Открыть защищённый браузер»** (прямой запуск `vpnguard-browser` в песочнице `GID 888` без `sudo`, лог в `~/Library/Logs/VPNGuard/browser-launch.log`).
+   - Быстрая смена активного сервера и открытие окна обновлений прямо по клику на баннер.
 2. **«Обзор» (Dashboard)**:
    - Статус демонов `vpnguard-xray`, `vpnguard-singbox`, `PF Kill-Switch` (счётчик заблокированных пакетов), выходного IP и краткая сводка аудита.
-   - Гибридный мониторинг: нативный `utun99`-зонд каждые 2.5с, локальный `--fast` опрос каждые 45с, реальный health-check прокси каждые 25с и `NWPathMonitor` (`debounce` 2.5с + пауза 6с после пробуждения Mac) с автосинхронизацией DNS и `vpnguard/egress`.
+   - Параллельный холодный старт (`refreshStatus --fast` + конкурентная загрузка правил/серверов) и гибридный мониторинг: нативный `utun99`-зонд каждые 2.5с, локальный `--fast` опрос каждые 45с, health-check прокси каждые 25с через переиспользуемую `URLSession` и `NWPathMonitor` (`debounce` 2.5с + пауза 6с после пробуждения Mac).
 3. **«Приложения» (Apps)**:
-   - Правила маршрутизации по `.app`-бандлу (`process_path_regex`) и CLI-бинарникам (`process_path`) с режимами `Туннель` / `Напрямую` / `Блок`.
+   - Правила маршрутизации по `.app`-бандлу (`process_path_regex`) и CLI-бинарникам (`process_path`) с режимами `Туннель` / `Напрямую` / `Блок` и кешированием иконок (`AppIconCache`).
 4. **«Сайты и домены» (Websites)**:
-   - Пользовательские домены и системные пресеты (*AI-сервисы через туннель*, *Сервисы РФ напрямую*, *Блокировка QUIC UDP:443*).
+   - Пользовательские домены с валидацией хостов, учётом специфичности поддоменов и системными пресетами (*AI-сервисы через туннель*, *Сервисы РФ напрямую*, *Блокировка QUIC UDP:443*).
 5. **«Монитор трафика» (Traffic Monitor)**:
    - Потоковый WebSocket к Clash API (`ws://127.0.0.1:9090/connections` и `/traffic`) с автозакрытием сокетов при уходе со вкладки.
-   - Группировка потоков по приложению и домену, пауза при наведении (`onHover`), поиск, фильтр и **правила в 1 клик** (inline-кнопки `Direct` / `VPN` и контекстное меню для домена, корневого домена и приложения).
+   - Кешированная группировка потоков (не пересчитывается на 1-секундных тиках скорости), пауза при наведении (`onHover`), параллельное закрытие групп соединений, кеш иконок и **правила в 1 клик** (inline-кнопки `Direct` / `VPN` и контекстное меню для домена, корневого домена и приложения).
 6. **«Сервер» (Server Config & Upstream)**:
    - Единый список карточек серверов с пингом и кнопкой **«+ Добавить сервер»** (модальное окно импорта `vless://` с живым предпросмотром `VlessPreviewParser` и JSON-конфига).
    - **Пинг серверов** в обход `utun99` (`GID 890` + `IP_BOUND_IF`), и **Auto-Failover** (3 пробы → прямой UDP DNS ре-синк `vpnguard/egress` → переключение на быстрейший сервер → 5-минутный cooldown цикла с активным Kill-Switch).
-   - Транзакционное переключение с валидацией `xray run -test` + `sing-box check` и откатом на `.bak`.
+   - Транзакционное переключение: при выключенном VPN обновляет конфиги без запуска демонов; при активном проверяет `18088/18089` + `utun99` и полностью откатывает конфиги, `vpnguard/egress` и демоны на `.bak` при сбое.
 7. **«Диагностика и логи» (Diagnostics)**:
-   - Две под-вкладки: **«Аудит утечек»** (12-точечный чек-лист `vpnguard test --json`) и **«Системные логи»** (последние 150 строк `sing-box`, `Xray`, `PF / Boot` и состояние `PF Rules` / `scutil --dns` / `utun99` с автоматической очисткой ANSI-кодов, цветовой подсветкой уровней, переносом строк, поиском, маскированием секретов и экспортом отчёта в Markdown).
+   - Две под-вкладки: **«Аудит утечек»** (12-точечный чек-лист `vpnguard test --json`) и **«Системные логи»** (последние 150 строк `sing-box`, `Xray`, `PF / Boot` через быстрый бинарный `seek` с безопасной ротацией на `8 MiB`, состояние `PF Rules` / `scutil --dns` / `utun99`, асинхронный рендер с подсветкой всех совпадений, маскированием секретов и экспортом отчёта в Markdown).
 8. **Встроенное обновление (`Обновление…`)**:
-   - **GitHub Releases**: тихая проверка `api.github.com/repos/RadmirMain/vpnguard/releases/latest` (с `ETag` / `If-None-Match` и `403` redirect-фолбэком), скачивание `VPNGuard-macos-arm64.zip`, проверка подписи **Ed25519** + **SHA-256**, атомарный staging в `/Applications` и перезапуск. При изменении встроенного `backend.sha256` предлагает обновить системные демоны через Touch ID (`install.sh --backend-only`).
-   - **Режим разработчика (`update.sh`)**: локальная пересборка из репозитория с проверкой `frontend.sha256` и `backend.sha256`.
+   - **GitHub Releases**: тихая проверка `api.github.com/repos/RadmirMain/vpnguard/releases/latest` (с `ETag` / `If-None-Match` и `403` redirect-фолбэком), скачивание `VPNGuard-macos-arm64.zip`, проверка подписи **Ed25519** + **SHA-256**, атомарный staging в `/Applications` и перезапуск (`~/Library/Logs/VPNGuard/github-update-relaunch.log`). При изменении встроенного `backend.sha256` предлагает обновить системные демоны через Touch ID (`install.sh --backend-only`).
+   - **Режим разработчика (`update.sh`)**: локальная пересборка из репозитория (при наличии `update.sh`) с проверкой `frontend.sha256` и `backend.sha256`.
 
 ---
 
@@ -108,24 +108,21 @@
    ```bash
    xattr -cr /Applications/VPNGuard.app
    ```
-3. Откройте `VPNGuard.app` — приложение предложит установить системные компоненты через Touch ID (`install.sh --backend-only`). Последующие обновления из GitHub Releases проверяются криптографической подписью **Ed25519** и **SHA-256** и устанавливаются автоматически.
+3. Откройте `VPNGuard.app` — приложение предложит установить системные компоненты через Touch ID (`install.sh --backend-only`; `install.sh` при необходимости подтянет `xray` и `sing-box` через Homebrew). Последующие обновления из GitHub Releases проверяются криптографической подписью **Ed25519** и **SHA-256** и устанавливаются автоматически.
 
 #### Вариант Б: Сборка из исходников
 ```bash
 git clone https://github.com/RadmirMain/vpnguard.git VPNGuard
 cd VPNGuard
 
-# Установка ядер (если ещё не установлены)
-brew install xray sing-box
-
-# Установка системных демонов, PF, CLI и hardened sudoers
+# Установка системных демонов, PF, CLI и hardened sudoers (при отсутствии xray/sing-box установит их через brew)
 sudo ./install.sh
 
 # Сборка и установка /Applications/VPNGuard.app
 ./app/VPNGuardApp/build_app.sh
 ```
 
-> **После самой первой установки**: выйдите из сеанса macOS или перезагрузите Mac, чтобы активные сессии сбросили кэшированную группу `888(vpnguard)`.
+> **После самой первой установки**: выйдите из сеанса macOS или перезагрузите Mac, чтобы активные сессии сбросили кэшированную группу `888(vpnguard)`. Если в `xray.json` остался шаблон `REPLACE_WITH_UUID`, установщик оставит защиту выключенной (`desired_state=off`) до настройки сервера.
 
 ### 3. Последующие обновления (в 1 клик или из терминала)
 - **Из приложения**: нажмите **«Обновление…»** в боковой панели (скачивает готовый релиз с GitHub или собирает из локального репозитория).
@@ -141,23 +138,23 @@ sudo ./install.sh
 | Команда | Описание |
 |---|---|
 | `vpnguard status [--json] [--fast]` | Статус безопасности, демонов, `utun99`, Clash API и `pauseUntil`. |
-| `sudo vpnguard on` | Запуск Xray/sing-box, армирование PF, установка DNS `1.1.1.1`, очистка таймера паузы. |
-| `sudo vpnguard off` | Сброс PF, остановка `sing-box`, восстановление исходного DNS. |
+| `sudo vpnguard on` | Подготовка конфигов, запись `desired_state=on`, армирование PF, ротация логов, запуск Xray/sing-box, синхронизация DNS `1.1.1.1`. |
+| `sudo vpnguard off` | Сброс PF (до снятия токена `-X`), остановка `sing-box`, запись `desired_state=off`, восстановление исходного DNS. |
 | `sudo vpnguard pause <300\|900>` | Временный прямой доступ для входа в Wi-Fi с fail-safe автовозвратом по wall-clock таймеру. |
 | `sudo vpnguard resume-if-expired` | Немедленный возврат защиты, если время `pause_until` уже истекло. |
-| `sudo vpnguard dns-sync` | Идемпотентная синхронизация DNS (`1.1.1.1`) на физических `en*`-интерфейсах. |
+| `sudo vpnguard dns-sync` | Идемпотентная синхронизация DNS (`1.1.1.1`) на активных физических `en*`-интерфейсах (`flush_dns_cache` только при изменениях). |
 | `sudo vpnguard test [--json]` | 12-точечный активный аудит утечек (IP, DNS, IPv6, `utun99`, LPE). |
-| `sudo vpnguard logs --json` | Последние 150 строк логов + `pfctl`/`scutil --dns`/`ifconfig utun99` с маскированием секретов. |
+| `sudo vpnguard logs --json` | Последние 150 строк логов (быстрый `seek` с конца) + `pfctl`/`scutil --dns`/`ifconfig utun99` с маскированием секретов. |
 | `sudo vpnguard rules get` | Вывод текущего `rules.json`. |
 | `sudo vpnguard rules apply [--stdin \| <path>]` | Валидация и атомарное применение `rules.json` с откатом на `.bak`. |
 | `sudo vpnguard server list [--json]` | Список настроенных upstream-профилей. |
 | `sudo vpnguard server ping --json` | Прямой замер TCP RTT до всех серверов через `GID 890` + `IP_BOUND_IF` в обход `utun99`. |
 | `sudo vpnguard server sync-pf` | Прямой UDP DNS ре-синк релея (`GID 890`) и обновление `vpnguard/egress` (+ `sing-box.json` при смене IP). |
 | `sudo vpnguard server import-vless [--stdin \| <path>]` | Импорт `vless://` или Xray JSON в `servers.json`. |
-| `sudo vpnguard server activate [--stdin \| <id>]` | Транзакционное переключение активного сервера с обновлением `vpnguard/egress`. |
+| `sudo vpnguard server activate [--stdin \| <id>]` | Транзакционное переключение активного сервера с проверкой `18088/18089/utun99` (или offline без запуска демонов) и откатом при сбое. |
 | `sudo vpnguard server delete [--stdin \| <id>]` | Удаление неактивного профиля сервера. |
 | `sudo vpnguard server update [--stdin \| <path>]` | Обновление из сырого Xray JSON с синхронизацией в `servers.json`. |
-| `vpnguard run <команда...>` | Запуск команды в изолированной песочнице `GID 888` (`vpnguard-exec`). |
+| `vpnguard run <команда...>` | Запуск команды в изолированной песочнице `GID 888` (`vpnguard-exec`; раздельные профили для Cursor и VS Code). |
 | `vpnguard shell` | Интерактивная защищённая оболочка `GID 888`. |
 | `vpnguard watch` | Консольный мониторинг состояния локального прокси. |
 
@@ -166,19 +163,19 @@ sudo ./install.sh
 ## 🧪 Тестирование и удаление
 
 ```bash
-# 1. Python unit-тесты (30 unit-тестов без живого прокси)
-python3 -m unittest tests/test_launcher.py tests/test_pf_syntax.py tests/test_singbox_config.py tests/test_vless_parser.py tests/test_logs_and_routing.py tests/test_pause_and_ping.py -v
+# 1. Оффлайн Python unit-тесты (39 тестов без живого прокси и root)
+python3 -m unittest tests/test_pf_syntax.py tests/test_singbox_config.py tests/test_vless_parser.py tests/test_logs_and_routing.py tests/test_pause_resume.py tests/test_server_ping.py -v
 
-# Опционально: live-тест прокси (требует запущенный Xray на 127.0.0.1:18088)
-python3 -m unittest tests/test_proxy.py -v
+# Полный набор Python-тестов на настроенном хосте (42 теста, включая test_launcher.py и test_proxy.py)
+python3 -m unittest discover -s tests -v
 
-# 2. Swift unit-тесты (10 тестов) и Release-сборка
+# 2. Swift unit-тесты (14 тестов) и Release-сборка
 swift test --package-path app/VPNGuardApp
 swift build --package-path app/VPNGuardApp -c release --arch arm64
 
 # 3. Живой 12-точечный аудит безопасности
 sudo vpnguard test
 
-# 4. Полное удаление (с бэкапом servers.json в ~/.vpnguard-backup/)
+# 4. Полное удаление (останавливает приложение/watcher, выгружает LaunchDaemons/Agent и сохраняет бэкап servers.json в ~/.vpnguard-backup/)
 sudo ./uninstall.sh
 ```

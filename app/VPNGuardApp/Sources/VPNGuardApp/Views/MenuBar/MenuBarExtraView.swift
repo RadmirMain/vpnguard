@@ -54,6 +54,7 @@ public struct MenuBarExtraView: View {
         .padding(14)
         .frame(width: 356)
         .background(VGTheme.backgroundContent)
+        .background(MenuBarWindowAnchor())
         .onAppear {
             vm.refreshBrowserAvailability()
         }
@@ -70,9 +71,23 @@ public struct MenuBarExtraView: View {
                 Text(message)
                     .font(.system(size: 11))
                     .foregroundStyle(.primary)
+                    .lineLimit(4)
+                    .truncationMode(.tail)
                     .fixedSize(horizontal: false, vertical: true)
+                    .help(message)
 
                 Spacer(minLength: 4)
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(message, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Скопировать текст ошибки")
 
                 Button {
                     vm.dismissToast()
@@ -561,5 +576,111 @@ private struct MenuBarActionButton: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
+    }
+}
+
+/// Keeps the MenuBarExtra(.window) top edge pinned below the menu bar when dynamic banners resize the popover.
+private struct MenuBarWindowAnchor: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            context.coordinator.attach(to: view.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            context.coordinator.attach(to: nsView.window)
+            context.coordinator.reanchorIfNeeded()
+        }
+    }
+
+    final class Coordinator {
+        private weak var window: NSWindow?
+        private var observers: [NSObjectProtocol] = []
+        private var anchorMaxY: CGFloat?
+        private var lastScreenID: ObjectIdentifier?
+        private var isAdjustingFrame = false
+
+        deinit {
+            removeObservers()
+        }
+
+        private func removeObservers() {
+            for observer in observers {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            observers.removeAll()
+        }
+
+        func attach(to window: NSWindow?) {
+            guard let window, self.window !== window else { return }
+            removeObservers()
+            self.window = window
+            resetAnchor(for: window)
+
+            let nc = NotificationCenter.default
+            observers.append(nc.addObserver(
+                forName: NSWindow.didResizeNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                self?.reanchorIfNeeded()
+            })
+            observers.append(nc.addObserver(
+                forName: NSWindow.didBecomeKeyNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self, let win = self.window else { return }
+                self.resetAnchor(for: win)
+                self.reanchorIfNeeded()
+            })
+            observers.append(nc.addObserver(
+                forName: NSWindow.didChangeScreenNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self, let win = self.window else { return }
+                self.resetAnchor(for: win)
+                self.reanchorIfNeeded()
+            })
+        }
+
+        private func resetAnchor(for window: NSWindow) {
+            let screen = window.screen ?? NSScreen.main
+            self.lastScreenID = screen.map { ObjectIdentifier($0) }
+            if let visibleMaxY = screen?.visibleFrame.maxY {
+                self.anchorMaxY = window.frame.maxY >= visibleMaxY - 20 ? window.frame.maxY : (visibleMaxY - 4)
+            } else {
+                self.anchorMaxY = window.frame.maxY
+            }
+        }
+
+        func reanchorIfNeeded() {
+            guard !isAdjustingFrame,
+                  let window, window.isVisible,
+                  let screen = window.screen ?? NSScreen.main else { return }
+
+            let currentScreenID = ObjectIdentifier(screen)
+            if lastScreenID != currentScreenID {
+                resetAnchor(for: window)
+            }
+
+            let visible = screen.visibleFrame
+            let targetMaxY = min(anchorMaxY ?? (visible.maxY - 4), visible.maxY)
+            let frame = window.frame
+            if frame.maxY < targetMaxY - 6 {
+                let newY = max(visible.minY, targetMaxY - frame.height)
+                if abs(frame.origin.y - newY) > 0.5 {
+                    isAdjustingFrame = true
+                    window.setFrameOrigin(NSPoint(x: frame.origin.x, y: newY))
+                    isAdjustingFrame = false
+                }
+            }
+        }
     }
 }

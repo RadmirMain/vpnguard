@@ -25,6 +25,9 @@
     <key>KeepAlive</key>
     <true/>
 
+    <key>ExitTimeOut</key>
+    <integer>5</integer>
+
     <key>StandardOutPath</key>
     <string>/var/log/vpnguard-xray.log</string>
 

@@ -119,12 +119,13 @@ block return out quick all
 ```pf
 pass out quick proto { tcp, udp } from any to { <ip1>, <ip2> } port <port> group 889 keep state (if-bound)
 ```
-Загружается через `pfctl -a vpnguard/egress -f /usr/local/etc/vpnguard/pf.egress.conf` при старте в [vpnguard-pf-boot.sh](src/pf/vpnguard-pf-boot.sh), при переключении серверов и при `vpnguard server sync-pf`.
+Загружается через `pfctl -a vpnguard/egress -f /usr/local/etc/vpnguard/pf.egress.conf` при старте в [vpnguard-pf-boot.sh](src/pf/vpnguard-pf-boot.sh), при переключении серверов и при `vpnguard server sync-pf`. При выключении (`off`/`flush`/`stop`) анкоры `vpnguard/egress` и `vpnguard` сбрасываются строго **до** снятия PF-токена `pfctl -X` и удаления `/var/run/vpnguard/pf.token`; при включении существующий токен переиспользуется только при `Status: Enabled` в `pfctl -s info`.
 
 ### 3.3. Обходные проверки через `GID 890 + IP_BOUND_IF = 25`
-При включённом `utun99` обычный трафик уходит в туннель до проверки PF. Чтобы измерить реальный пинг серверов (`server ping --json`) или перерезолвить домен активного релея при мёртвом туннеле (`server sync-pf`), `_run_in_gid890_worker()` форкает дочерний процесс, сбрасывает права в последовательности `os.setgroups([890])` → `os.setgid(890)` → `os.setuid(nobody)` и привязывает TCP/UDP-сокеты к физическому интерфейсу (из `netstat -rn -f inet`, исключая `utun*`/`lo*`/`awdl*`) через `setsockopt(IPPROTO_IP, 25, ...)`.
+При включённом `utun99` обычный трафик уходит в туннель до проверки PF. Чтобы измерить реальный пинг серверов (`server ping --json`) или напрямую отрезолвить домен релея (`server sync-pf`, `activate_server`, `_cmd_on_locked`), `_run_in_gid890_worker()` форкает дочерний процесс, сбрасывает права в последовательности `os.setgroups([890])` → `os.setgid(890)` → `os.setuid(nobody)`, привязывает TCP/UDP-сокеты к физическому интерфейсу (из `netstat -rn -f inet`, исключая `utun*`/`lo*`/`awdl*`) через `setsockopt(IPPROTO_IP, 25, ...)` и ограничивает ожидание результата через `select.select()` с `SIGKILL` + `waitpid()` по таймауту.
 - `server ping --json` берёт кэшированные `resolvedIps` из `servers.json` и параллельно замеряет TCP RTT.
 - `server sync-pf` отправляет прямой RFC 1035 UDP A-запрос на `1.1.1.1:53` / `8.8.8.8:53`, обновляет `pf.egress.conf`, а при смене IP релея обновляет `servers.json`, `active_server.json`, `route_exclude_address` в `sing-box.json` и перезапускает `sing-box`.
+- `activate_server()` резолвит домен напрямую через `resolve_ipv4_direct_via_gid890()`, при выключенном VPN лишь сохраняет конфиги без `launchctl kickstart`, а при включённом VPN проверяет слушатели `18088`/`18089` и `utun99` (`get_utun_status()`), выполняя полный откат конфигов, `vpnguard/egress` и перезапуск демонов (`_rollback_activation()`) при сбое или исключении.
 
 ---
 
@@ -133,14 +134,15 @@ pass out quick proto { tcp, udp } from any to { <ip1>, <ip2> } port <port> group
 ### 4.1. Конфигурация DNS
 - `dns-remote`: `type: "https"`, `server: "1.1.1.1"`, `path: "/dns-query"`, `detour: "xray-upstream"`.
 - `dns-direct`: `type: "tls"`, `server: "77.88.8.8"` (**без `detour`** — в `sing-box 1.14+` `"detour": "direct"` вызывает `FATAL`).
-- Приоритет DNS-правил: `user_proxy_domains` → `user_direct_domains` → `ruDirect` → `aiServicesProxy` → `AAAA reject`.
+- Пользовательские правила доменов (`dns.rules` и `route.rules`) сортируются по убыванию специфичности (числу меток домена) с группировкой только смежных однотипных правил (`example.com -> proxy` не перебивает `local.example.com -> direct`), а пользовательские `.ru` прокси-домены идут строго перед `ruDirect`.
+- `sync_system_dns()` синхронизирует только активные `en*`-сервисы (`_get_active_en_interfaces()`), а `restore_system_dns()` проходит по всем сервисам из `dns_backup.json` и списку аппаратных сервисов; `flush_dns_cache()` вызывается только при фактическом изменении DNS.
 
 ### 4.2. Иерархия правил `build_singbox_config()`
 1. `sniff` → `hijack-dns` (порт `53` / протокол `dns`).
 2. `reject` QUIC (`UDP 443` при `blockQuic`).
 3. `ip_is_private` → `direct`.
 4. Приложения: `.app`-бандлы через `process_path_regex` (`^/Path/App\.app/.*`), CLI-бинарники через точный `process_path`.
-5. Пользовательские домены (`domain_suffix`).
+5. Пользовательские домены (`domain_suffix`, упорядоченные по специфичности).
 6. Пресеты (`aiServicesProxy`, `ruDirect`).
 7. Блокировка прочего `udp` (`action: "reject"`).
 8. `final`: **`"xray-upstream"`** (контролируется программными `ValueError`-инвариантами).
@@ -153,33 +155,39 @@ pass out quick proto { tcp, udp } from any to { <ip1>, <ip2> } port <port> group
 - `/usr/local/etc/vpnguard/sing-box.json`: **`0600 root:wheel`**.
 - `/usr/local/etc/vpnguard/api_secret`: **`0640 root:admin`** (читается GUI без `sudo`).
 - `/usr/local/etc/vpnguard/active_server.json`: **`0644 root:wheel`** (не-секретные метаданные).
+- `/var/db/vpnguard/desired_state`: **`0644 root:wheel`** (`on` / `off`, синхронизируется с `launchctl enable/disable` для `com.vpnguard.pf` и `com.vpnguard.singbox`, предотвращая ложное включение при загрузке macOS).
 
-### 5.2. Модель `sudoers` (ноль `*`)
+### 5.2. Модель `sudoers` (ноль `*`) и блокировка состояния
 `/etc/sudoers.d/vpnguard` разрешает исключительно точные команды:
 - `--stdin` (с ограничением `MAX_STDIN_BYTES = 1 MiB` в `read_stdin_bounded()`): `rules apply --stdin`, `server import-vless --stdin`, `server activate --stdin`, `server delete --stdin`, `server update --stdin`.
 - Точные команды без пользовательских аргументов: `on`, `off`, `pause 300`, `pause 900`, `resume-if-expired`, `dns-sync`, `status`, `status --json`, `status --json --fast`, `rules get`, `server list`, `server list --json`, `server ping --json`, `server sync-pf`, `test`, `test --json`, `logs --json`, а также read-only `pfctl`.
+- Мутирующие команды (`on`, `off`, `pause`, `resume-if-expired`, `rules apply`, `server activate`, `server update`) и фаза возврата в `pause-watcher` сериализуются через re-entrant неблокирующий `acquire_state_lock()` (`fcntl.flock`, `/var/run/vpnguard/state.lock`, таймаут 15с).
 
-### 5.3. Санитизация диагностических логов (`vpnguard logs --json`)
-Логи в `/var/log/vpnguard*.log` недоступны непривилегированному GUI напрямую (`640 root:wheel` / `660 _vpnguard_proxy`). Команда `vpnguard logs --json` читает последние 150 строк каждого из 3 логов + `pfctl -a vpnguard -s rules` + `scutil --dns` + `ifconfig utun99`, прогоняя всё через `redact_sensitive_text()` (маскирует `vless://`, UUID, ключи Reality, `Bearer`-токены, `api_secret` и адреса/SNI серверов).
+### 5.3. Санитизация и ротация диагностических логов (`vpnguard logs --json`)
+Логи в `/var/log/vpnguard*.log` недоступны непривилегированному GUI напрямую (`640 root:wheel` / `_vpnguard_proxy`).
+- `get_pf_status()` объединяет чтение правил и счётчика блокировок в один вызов `pfctl -a vpnguard -s rules -v` через `_run_pfctl()`.
+- `_tail_file_lines()` читает последние 150 строк бинарным `seek` с конца файла блоками по `8192` Б с единым декодированием UTF-8.
+- Xray пишет логи через `launchd` (`StandardOutPath`/`StandardErrorPath`) без дублирующего файлового `error`-вывода; `rotate_log_if_needed()` ротирует логи > `8 MiB` в `.1` строго до `bootstrap`/`kickstart`.
+- Команда `vpnguard logs --json` прогоняет хвост логов и состояние `pfctl`/`scutil --dns`/`ifconfig utun99` через `redact_sensitive_text()` (маскирует `vless://`, `trojan://`, `ss://`, `vmess://`, UUID, ключи Reality, `Bearer`-токены, JSON-поля `password`/`psk`/`privateKey`/`token`/`auth`, query-параметры, `api_secret` и адреса/SNI серверов).
 
 ### 5.4. Fail-Safe пауза для Captive Portal (`vpnguard pause`)
 - Записывает wall-clock Unix-timestamp в `/var/run/vpnguard/pause_until` (`0644 root:wheel`), отключает PF/sing-box без удаления этого файла и гарантирует ровно один фоновый процесс `pause-watcher` через `/var/run/vpnguard/pause_watcher.pid`.
-- `pause-watcher` проверяет `time.time() >= pause_until` каждые 5с (переживает сон Mac и закрытие GUI). `vpnguard on` и `vpnguard off` всегда очищают оба файла и завершают watcher.
+- `pause-watcher` проверяет `time.time() >= pause_until` каждые 5с без удержания `flock` во время сна, при истечении перепроверяет время под `acquire_state_lock()`, вызывает `cmd_on()` и удаляет PID-файл в `finally`. `vpnguard on` и `vpnguard off` всегда очищают оба файла и завершают watcher.
 
 ---
 
 ## 6. Сборка, самообновление и структура `VPNGuardApp`
 
 ### 6.1. Релизный пайплайн GitHub Releases и локальное обновление (`update.sh`)
-- **Единый источник версии**: файл `VERSION` в корне репозитория считывается в `build_app.sh`, `update.sh` и `.github/workflows/release.yml`, записываясь в `CFBundleShortVersionString` до подписи бандла.
+- **Единый источник версии**: файл `VERSION` (сейчас `3.0.1`) в корне репозитория считывается в `build_app.sh`, `update.sh` и `.github/workflows/release.yml`, записываясь в `CFBundleShortVersionString` до подписи бандла.
 - **GitHub Releases (`.github/workflows/release.yml` + `GitHubReleaseUpdater.swift`)**:
-  - При пуше тега `v*` CI (`macos-14`) прогоняет Swift/Python-тесты, собирает `VPNGuard.app`, упаковывает системный бэкенд (`src/`, `bin/`, `install.sh`, `backend.sha256`) в `Contents/Resources/backend/`, пакует бандл через `ditto`, считает `.sha256` и подписывает архив приватным ключом **Ed25519** (`RELEASE_SIGNING_PRIVATE_KEY` → `.sig`).
-  - Приложение опрашивает `releases/latest` с `ETag` / `If-None-Match` (при `403` — `HEAD` redirect-фолбэк), проверяет Ed25519-подпись по вшитому публичному ключу, `SHA-256` и `codesign`, подготавливает staging на разделе `/Applications` и перезапускается без `open -n` с таймаутом ожидания PID `10с`.
+  - При пуше тега `v*` CI (`macos-15`) устанавливает `sing-box` и `xray` через Homebrew, прогоняет Swift и оффлайн Python-тесты, собирает `VPNGuard.app`, упаковывает системный бэкенд (`src/`, `bin/` за вычетом 30 МБ `vpnguard-xray` и `bin/vpnguard-exec`, предсобранный `libexec/vpnguard-exec`, `install.sh`, `backend.sha256`) в `Contents/Resources/backend/`, пакует бандл через `ditto`, считает `.sha256` и подписывает архив приватным ключом **Ed25519** (`RELEASE_SIGNING_PRIVATE_KEY` → `.sig`).
+  - Приложение опрашивает `releases/latest` с `ETag` / `If-None-Match` (при `403` — `HEAD` redirect-фолбэк), проверяет Ed25519-подпись по вшитому публичному ключу, `SHA-256` и `codesign`, подготавливает staging на разделе `/Applications` и перезапускается через `nohup` (с логом в `~/Library/Logs/VPNGuard/github-update-relaunch.log`) без `open -n` и с таймаутом ожидания PID `10с`.
   - После запуска новой версии приложение сверяет встроенный `backend.sha256` с `/usr/local/etc/vpnguard/backend.sha256` и при расхождении предлагает обновить системный слой через Touch ID (`install.sh --backend-only`).
 - **Локальное двухэтапное обновление (`update.sh`)**:
   - `update.sh --check` выполняет `git fetch` с таймаутом `5с` (`GIT_TERMINAL_PROMPT=0`) и сравнивает `backend.sha256` и `frontend.sha256`.
-  - Сборка `.app` идёт от обычного пользователя в `/tmp`, `frontend.sha256`, `Resources/backend/` и `xattr -cr` выполняются **до** `codesign --force --deep --sign -`.
-  - Elevation через Touch ID (`osascript`) вызывается только при изменении бэкенда (`install.sh --backend-only`), при этом `install.sh` определяет `TARGET_USER` через `stat -f '%Su' /dev/console`.
+  - Сборка `.app` идёт от обычного пользователя в `/tmp`, `frontend.sha256`, `Resources/backend/` (без `vpnguard-xray` и `bin/vpnguard-exec`) и `xattr -cr` выполняются **до** `codesign --force --deep --sign -`.
+  - Elevation через Touch ID (`osascript`) вызывается только при изменении бэкенда (`install.sh --backend-only`), при этом `install.sh` и `uninstall.sh` определяют `TARGET_USER` через `stat -f '%Su' /dev/console`.
 
 ### 6.2. Структура `app/VPNGuardApp`
 ```
@@ -192,34 +200,34 @@ app/VPNGuardApp/
 ├── Sources/VPNGuardApp/
 │   ├── App/
 │   │   ├── AppDelegate.swift        # signal(SIGPIPE, SIG_IGN), background MenuBar policy
-│   │   └── VPNGuardApp.swift        # MenuBarExtra (+ таймер паузы) & Control Center window
+│   │   └── VPNGuardApp.swift        # MenuBarExtra (условный TimelineView паузы) & Control Center window
 │   ├── Models/
 │   │   ├── AuditModels.swift
 │   │   ├── DiagnosticsModels.swift  # DiagnosticsLogsSnapshot
 │   │   ├── RulesModels.swift
 │   │   ├── ServerModels.swift       # VlessPreviewParser, ServerPingResult, UpdateCheckResult
-│   │   ├── StatusModels.swift       # SystemStatus (+ pauseUntil)
-│   │   └── TrafficModels.swift      # ClashConnection, ByteFormatter
+│   │   ├── StatusModels.swift       # ProtectionState (+ .tunnelRecovering), SystemStatus (+ pauseUntil)
+│   │   └── TrafficModels.swift      # ClashConnection, ClashConnectionSnapshot (connections: null -> []), ByteFormatter
 │   ├── Services/
 │   │   ├── AppDiscoveryService.swift
-│   │   ├── CLIExecutor.swift        # stdinData + конкурентный Pipe + timeout
-│   │   ├── GitHubReleaseUpdater.swift # Ed25519 + SHA-256 + ETag + backend.sha256 sync
-│   │   ├── TrafficMonitorService.swift # WebSocket /connections & /traffic + автореконнект
-│   │   └── VPNGuardService.swift    # CLI wrapper, direct browser launcher, 204 health probe, update.sh
+│   │   ├── CLIExecutor.swift        # stdinData + конкурентный Pipe + немедленный возврат при timeout
+│   │   ├── GitHubReleaseUpdater.swift # Ed25519 + SHA-256 + ETag + backend.sha256 sync + nohup relaunch
+│   │   ├── TrafficMonitorService.swift # WebSocket /connections & /traffic + connectionsVersion
+│   │   └── VPNGuardService.swift    # CLI wrapper, direct browser launcher, reusable URLSession 204 probe, update.sh
 │   ├── ViewModels/
-│   │   └── VPNGuardViewModel.swift  # Поллинг, NWPathMonitor (2.5с debounce + 6с wake grace), failover, 1-click upsert
+│   │   └── VPNGuardViewModel.swift  # Параллельный старт, stateEpoch, NWPathMonitor, failover, 1-click upsert
 │   └── Views/
-│       ├── Apps/ (AppPickerSheet.swift, AppsManagementView.swift)
-│       ├── Common/ (DesignSystem.swift, GlassCard.swift, ToastView.swift)
+│       ├── Apps/ (AppPickerSheet.swift, AppsManagementView.swift — стабильный Binding по id + AppIconCache)
+│       ├── Common/ (DesignSystem.swift [AppIconCache, VGFormatters, VGCard], ToastView.swift)
 │       ├── Dashboard/DashboardView.swift
-│       ├── Diagnostics/DiagnosticsView.swift # Под-вкладки Аудит/Логи + ANSI AttributedString + MD export
-│       ├── MenuBar/MenuBarExtraView.swift    # Pause 5m/15m, Tunnel Health, Browser Launcher, Update Banner
+│       ├── Diagnostics/DiagnosticsView.swift # Асинхронный debounced AttributedString + автообновление только на вкладке логов
+│       ├── MenuBar/MenuBarExtraView.swift    # Pause 5m/15m (TimelineView), Tunnel Health, Browser Launcher, Update Banner
 │       ├── Server/ServerConfigView.swift     # Единый список серверов, AddServerSheet, GID 890 Ping, Auto-Failover
-│       ├── Traffic/TrafficMonitorView.swift  # Grouping + [VPN|Direct] переключатель + ContextMenu
-│       ├── Websites/WebsitesManagementView.swift
+│       ├── Traffic/TrafficMonitorView.swift  # Кешированная группировка, AppIconCache, parallel withTaskGroup close
+│       ├── Websites/WebsitesManagementView.swift # Стабильный Binding по id
 │       └── MainContainerView.swift           # Monochrome Sidebar + AppUpdateSheetView
 └── Tests/VPNGuardAppTests/
-    └── VPNGuardAppTests.swift                # 10 unit-тестов (включая форматтеры и Ed25519)
+    └── VPNGuardAppTests.swift                # 14 unit-тестов (включая null connections, tunnelRecovering, AppIconCache, Ed25519)
 ```
 
 ---
@@ -233,9 +241,10 @@ app/VPNGuardApp/
 | C Setuid Helper | `/usr/local/bin/vpnguard-exec` | `root:admin 4750` | Setuid песочница GID `888` |
 | Браузерный wrapper | `/usr/local/bin/vpnguard-browser` | `root:wheel 755` | Изолированный Chromium |
 | Профиль браузера | `/var/db/vpnguard/browser-profile` | `root:vpnguard 770` | Изолированный `--user-data-dir` |
+| Желаемое состояние VPN | `/var/db/vpnguard/desired_state` | `root:wheel 644` | Персистентный флаг `on`/`off` для загрузки macOS |
 | `sing-box` бинарник | `/usr/local/libexec/vpnguard-singbox` | `root:wheel 755` | TUN daemon Mach-O |
 | `Xray` бинарник | `/usr/local/libexec/vpnguard-xray` | `root:wheel 755` | Proxy daemon Mach-O |
-| PF Bootstrap | `/usr/local/libexec/vpnguard-pf-boot.sh` | `root:wheel 755` | Инициализация фаервола |
+| PF Bootstrap | `/usr/local/libexec/vpnguard-pf-boot.sh` | `root:wheel 755` | Инициализация и снятие фаервола |
 | Правила анкора PF | `/etc/pf.anchors/vpnguard` | `root:wheel 644` | Основной анкор PF |
 | Динамический egress PF | `/usr/local/etc/vpnguard/pf.egress.conf` | `root:wheel 644` | Sub-anchor `vpnguard/egress` |
 | Sudoers правила | `/etc/sudoers.d/vpnguard` | `root:wheel 440` | Точные правила без `*` |
@@ -247,8 +256,11 @@ app/VPNGuardApp/
 | Бэкап системного DNS | `/usr/local/etc/vpnguard/dns_backup.json` | `root:wheel 644` | Исходные DNS до `vpnguard on` |
 | Динамические правила | `/usr/local/etc/vpnguard/rules.json` | `root:wheel 644` | Правила приложений/доменов |
 | Хеш бэкенда | `/usr/local/etc/vpnguard/backend.sha256` | `root:wheel 644` | Эталон для `update.sh` |
+| Блокировка мутаций | `/var/run/vpnguard/state.lock` | `root:wheel 644` | Межпроцессный `flock` состояния CLI |
+| Токен reference-count PF | `/var/run/vpnguard/pf.token` | `root:wheel 600` | Токен `pfctl -E` для корректного `-X` |
 | Таймер паузы Wi-Fi | `/var/run/vpnguard/pause_until` | `root:wheel 644` | Unix-timestamp окончания паузы |
 | PID watcher'а паузы | `/var/run/vpnguard/pause_watcher.pid` | `root:wheel 644` | Защита от дублей watcher |
-| Логи сервисов | `/var/log/vpnguard*.log` | `root:wheel 640` / `_vpnguard_proxy 660` | Логи PF, sing-box, Xray |
+| Системные логи сервисов | `/var/log/vpnguard*.log(.1)` | `root:wheel 640` / `_vpnguard_proxy` | Логи PF, sing-box, Xray (ротация 8 MiB -> `.1`) |
+| Пользовательские логи GUI | `~/Library/Logs/VPNGuard/*.log` | `user:staff` | Логи запуска браузера и relaunch-обновлений |
 | macOS Приложение | `/Applications/VPNGuard.app` | `user:admin 755` | Нативное SwiftUI GUI + `frontend.sha256` |
 | LaunchAgent GUI | `~/Library/LaunchAgents/com.vpnguard.app.plist` | `user:staff` | Единый автозапуск приложения |

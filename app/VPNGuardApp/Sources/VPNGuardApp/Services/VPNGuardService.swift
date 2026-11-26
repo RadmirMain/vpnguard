@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import OSLog
 
 public enum VPNGuardError: LocalizedError {
     case commandFailed(String)
@@ -70,12 +71,54 @@ public final class VPNGuardService {
         return Date(timeIntervalSince1970: ts)
     }
 
+    private static let cliLogger = Logger(subsystem: "com.vpnguard.app", category: "CLI")
+
+    // MARK: - Error Sanitization
+    public static func sanitizeCLIError(_ raw: String, fallback: String) -> String {
+        let trimmedRaw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedRaw.isEmpty {
+            cliLogger.error("CLI error output: \(trimmedRaw, privacy: .public)")
+        }
+
+        // Strip ANSI escape codes
+        let ansiStripped = raw.replacingOccurrences(
+            of: #"\x1B\[[0-9;]*[A-Za-z]"#,
+            with: "",
+            options: .regularExpression
+        )
+        let lines = ansiStripped
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !lines.isEmpty else { return fallback }
+
+        // If a Python traceback slipped through, surface only the final exception line
+        if ansiStripped.contains("Traceback (most recent call last):") {
+            if let lastLine = lines.last, !lastLine.hasPrefix("File \"") {
+                return String(lastLine.prefix(240))
+            }
+            return fallback
+        }
+
+        // Prefer explicit [!] error lines if present
+        if let errLine = lines.last(where: { $0.hasPrefix("[!]") }) {
+            let cleaned = errLine.replacingOccurrences(of: "[!]", with: "").trimmingCharacters(in: .whitespaces)
+            if !cleaned.isEmpty {
+                return String(cleaned.prefix(240))
+            }
+        }
+
+        let joined = lines.prefix(3).joined(separator: " ")
+        return String(joined.prefix(240))
+    }
+
     // MARK: - Status
     public func fetchStatus(fast: Bool = false) async throws -> SystemStatus {
         let args = fast ? ["status", "--json", "--fast"] : ["status", "--json"]
         let result = await executor.execute(arguments: args, timeout: fast ? 10.0 : 20.0)
         guard !result.stdout.isEmpty else {
-            throw VPNGuardError.commandFailed(result.stderr.isEmpty ? "Команда status не вернула данных" : result.stderr)
+            throw VPNGuardError.commandFailed(Self.sanitizeCLIError(result.stderr, fallback: "Команда status не вернула данных"))
         }
 
         guard let data = result.stdout.data(using: .utf8) else {
@@ -91,35 +134,35 @@ public final class VPNGuardService {
 
     // MARK: - Power & DNS Control
     public func turnOn() async throws {
-        let result = await executor.execute(arguments: ["on"], timeout: 30.0)
+        let result = await executor.execute(arguments: ["on"], timeout: 45.0)
         if !result.isSuccess {
             let details = result.stderr.isEmpty ? result.stdout : result.stderr
-            throw VPNGuardError.commandFailed(details.isEmpty ? "Не удалось включить защиту" : details)
+            throw VPNGuardError.commandFailed(Self.sanitizeCLIError(details, fallback: "Не удалось включить защиту"))
         }
     }
 
     public func turnOff() async throws {
-        let result = await executor.execute(arguments: ["off"], timeout: 25.0)
+        let result = await executor.execute(arguments: ["off"], timeout: 30.0)
         if !result.isSuccess {
             let details = result.stderr.isEmpty ? result.stdout : result.stderr
-            throw VPNGuardError.commandFailed(details.isEmpty ? "Не удалось отключить защиту" : details)
+            throw VPNGuardError.commandFailed(Self.sanitizeCLIError(details, fallback: "Не удалось отключить защиту"))
         }
     }
 
     public func syncDns() async throws {
-        let result = await executor.execute(arguments: ["dns-sync"], timeout: 15.0)
+        let result = await executor.execute(arguments: ["dns-sync"], timeout: 20.0)
         if !result.isSuccess {
             let details = result.stderr.isEmpty ? result.stdout : result.stderr
-            throw VPNGuardError.commandFailed(details.isEmpty ? "Не удалось синхронизировать DNS" : details)
+            throw VPNGuardError.commandFailed(Self.sanitizeCLIError(details, fallback: "Не удалось синхронизировать DNS"))
         }
     }
 
     public func pauseProtection(seconds: Int = 300) async throws -> Date {
         let allowed = (seconds == 900) ? "900" : "300"
-        let result = await executor.execute(arguments: ["pause", allowed], timeout: 25.0)
+        let result = await executor.execute(arguments: ["pause", allowed], timeout: 30.0)
         guard result.isSuccess else {
             let details = result.stderr.isEmpty ? result.stdout : result.stderr
-            throw VPNGuardError.commandFailed(details.isEmpty ? "Не удалось поставить защиту на паузу" : details)
+            throw VPNGuardError.commandFailed(Self.sanitizeCLIError(details, fallback: "Не удалось поставить защиту на паузу"))
         }
         if let data = result.stdout.data(using: .utf8),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -130,10 +173,10 @@ public final class VPNGuardService {
     }
 
     public func resumeIfExpired() async throws {
-        let result = await executor.execute(arguments: ["resume-if-expired"], timeout: 30.0)
+        let result = await executor.execute(arguments: ["resume-if-expired"], timeout: 45.0)
         if !result.isSuccess {
             let details = result.stderr.isEmpty ? result.stdout : result.stderr
-            throw VPNGuardError.commandFailed(details.isEmpty ? "Не удалось восстановить защиту" : details)
+            throw VPNGuardError.commandFailed(Self.sanitizeCLIError(details, fallback: "Не удалось восстановить защиту"))
         }
     }
 
@@ -348,10 +391,10 @@ public final class VPNGuardService {
 
     public func applyRules(_ rules: UserRules) async throws {
         let data = try jsonEncoder.encode(rules)
-        let result = await executor.execute(arguments: ["rules", "apply", "--stdin"], stdinData: data, timeout: 30.0)
+        let result = await executor.execute(arguments: ["rules", "apply", "--stdin"], stdinData: data, timeout: 40.0)
         if !result.isSuccess {
             let errorDetails = result.stderr.isEmpty ? result.stdout : result.stderr
-            throw VPNGuardError.commandFailed(errorDetails.trimmingCharacters(in: .whitespacesAndNewlines))
+            throw VPNGuardError.commandFailed(Self.sanitizeCLIError(errorDetails, fallback: "Не удалось применить правила"))
         }
     }
 
@@ -362,10 +405,10 @@ public final class VPNGuardService {
             throw VPNGuardError.invalidConfig("Введенный текст не является валидным JSON")
         }
 
-        let result = await executor.execute(arguments: ["server", "update", "--stdin"], stdinData: data, timeout: 30.0)
+        let result = await executor.execute(arguments: ["server", "update", "--stdin"], stdinData: data, timeout: 40.0)
         if !result.isSuccess {
             let errorDetails = result.stderr.isEmpty ? result.stdout : result.stderr
-            throw VPNGuardError.commandFailed(errorDetails.trimmingCharacters(in: .whitespacesAndNewlines))
+            throw VPNGuardError.commandFailed(Self.sanitizeCLIError(errorDetails, fallback: "Не удалось обновить сервер"))
         }
 
         return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -376,7 +419,7 @@ public final class VPNGuardService {
         let result = await executor.execute(arguments: ["server", "list", "--json"], timeout: 15.0)
         guard result.isSuccess else {
             let errorDetails = result.stderr.isEmpty ? result.stdout : result.stderr
-            throw VPNGuardError.commandFailed("Не удалось получить список серверов: \(errorDetails)")
+            throw VPNGuardError.commandFailed(Self.sanitizeCLIError(errorDetails, fallback: "Не удалось получить список серверов"))
         }
         guard let data = result.stdout.data(using: .utf8) else {
             throw VPNGuardError.commandFailed("Пустой ответ от сервера")
@@ -397,7 +440,7 @@ public final class VPNGuardService {
         let result = await executor.execute(arguments: ["server", "import-vless", "--stdin"], stdinData: data, timeout: 25.0)
         guard result.isSuccess else {
             let errorDetails = result.stderr.isEmpty ? result.stdout : result.stderr
-            throw VPNGuardError.commandFailed(errorDetails.trimmingCharacters(in: .whitespacesAndNewlines))
+            throw VPNGuardError.commandFailed(Self.sanitizeCLIError(errorDetails, fallback: "Не удалось импортировать профиль"))
         }
 
         guard let outData = result.stdout.data(using: .utf8) else {
@@ -415,10 +458,10 @@ public final class VPNGuardService {
         guard let data = id.data(using: .utf8) else {
             throw VPNGuardError.invalidConfig("Некорректный ID сервера")
         }
-        let result = await executor.execute(arguments: ["server", "activate", "--stdin"], stdinData: data, timeout: 30.0)
+        let result = await executor.execute(arguments: ["server", "activate", "--stdin"], stdinData: data, timeout: 40.0)
         guard result.isSuccess else {
             let errorDetails = result.stderr.isEmpty ? result.stdout : result.stderr
-            throw VPNGuardError.commandFailed(errorDetails.trimmingCharacters(in: .whitespacesAndNewlines))
+            throw VPNGuardError.commandFailed(Self.sanitizeCLIError(errorDetails, fallback: "Не удалось активировать сервер"))
         }
     }
 
@@ -429,7 +472,7 @@ public final class VPNGuardService {
         let result = await executor.execute(arguments: ["server", "delete", "--stdin"], stdinData: data, timeout: 15.0)
         guard result.isSuccess else {
             let errorDetails = result.stderr.isEmpty ? result.stdout : result.stderr
-            throw VPNGuardError.commandFailed(errorDetails.trimmingCharacters(in: .whitespacesAndNewlines))
+            throw VPNGuardError.commandFailed(Self.sanitizeCLIError(errorDetails, fallback: "Не удалось удалить сервер"))
         }
     }
 
@@ -437,7 +480,7 @@ public final class VPNGuardService {
         let result = await executor.execute(arguments: ["server", "ping", "--json"], timeout: 20.0)
         guard result.isSuccess, let data = result.stdout.data(using: .utf8), !data.isEmpty else {
             let errorDetails = result.stderr.isEmpty ? result.stdout : result.stderr
-            throw VPNGuardError.commandFailed(errorDetails.isEmpty ? "Не удалось выполнить пинг серверов" : errorDetails)
+            throw VPNGuardError.commandFailed(Self.sanitizeCLIError(errorDetails, fallback: "Не удалось выполнить пинг серверов"))
         }
         do {
             return try jsonDecoder.decode([ServerPingResult].self, from: data)
@@ -447,10 +490,10 @@ public final class VPNGuardService {
     }
 
     public func syncPfEgress() async throws {
-        let result = await executor.execute(arguments: ["server", "sync-pf"], timeout: 15.0)
+        let result = await executor.execute(arguments: ["server", "sync-pf"], timeout: 25.0)
         if !result.isSuccess {
             let details = result.stderr.isEmpty ? result.stdout : result.stderr
-            throw VPNGuardError.commandFailed(details.isEmpty ? "Не удалось обновить vpnguard/egress" : details)
+            throw VPNGuardError.commandFailed(Self.sanitizeCLIError(details, fallback: "Не удалось обновить vpnguard/egress"))
         }
     }
 
